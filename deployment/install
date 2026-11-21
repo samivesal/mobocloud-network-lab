@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+umask 077
+start=0
+case "${1-}" in
+    --start) start=1; shift ;;
+    "") ;;
+    *) echo 'Usage: deployment/install [--start]' >&2; exit 2 ;;
+esac
+[ "$#" -eq 0 ] || { echo 'Usage: deployment/install [--start]' >&2; exit 2; }
+. /etc/os-release
+[ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] && [ "$(id -u)" = 0 ] || { echo 'Requires root on Debian 13'; exit 1; }
+if [ "$start" = 1 ]; then
+    apt-get update
+    apt-get install -y ca-certificates curl python3-venv
+fi
+for cmd in python3 curl systemctl runuser; do command -v "$cmd" >/dev/null; done
+src=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+base=/opt/mobohub-lab
+conf=/etc/mobohub-network-lab
+state=/var/lib/mobohub-network-lab
+if [ -e "$state/lab.sqlite" ] && [ ! -s "$conf/keys/identity.json" ]; then
+    echo 'The existing database requires its original identity.json. Restore the identity before upgrading.' >&2
+    exit 1
+fi
+if ! id mobohub-lab >/dev/null 2>&1; then useradd --system --user-group --no-create-home --shell /usr/sbin/nologin mobohub-lab; fi
+install -d -m 0755 "$base" "$base/releases"
+dest=$(mktemp -d "$base/releases/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
+release=${dest##*/}
+cp -r "$src/lab" "$src/frontend" "$src/requirements.txt" "$dest/"
+python3 -m venv "$dest/.venv"
+"$dest/.venv/bin/pip" install -r "$dest/requirements.txt"
+chmod -R a+rX "$dest"
+install -d -m 0750 -g mobohub-lab "$conf" "$conf/keys"
+if [ ! -f "$conf/settings" ]; then install -m 0640 -g mobohub-lab "$src/.env.example" "$conf/settings"; fi
+if [ ! -f "$conf/keys/identity.json" ]; then
+ (cd "$dest" && LAB_KEY_DIR="$conf/keys" .venv/bin/python -m lab.main init)
+ chgrp mobohub-lab "$conf/keys/identity.json"
+ chmod 0640 "$conf/keys/identity.json"
+fi
+(cd "$dest" && runuser -u mobohub-lab -- .venv/bin/python -B -c 'import lab.main, lab.runner')
+install -m 0644 "$src/deployment/mobohub-lab.service" /etc/systemd/system/mobohub-lab.service
+ln -s "$dest" "$base/.current-$release"
+mv -Tf "$base/.current-$release" "$base/current"
+systemctl daemon-reload
+if [ "$start" = 1 ]; then
+    systemctl restart mobohub-lab.service
+    systemctl is-active --quiet mobohub-lab.service
+    echo 'Panel running at http://127.0.0.1:8765 (default port; see LAB_PORT in settings).'
+else
+    echo 'Release installed. Start it with: systemctl start mobohub-lab'
+fi

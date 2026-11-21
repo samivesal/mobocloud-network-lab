@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>تست اشتراک | موبوهب</title>
+  <link rel="stylesheet" href="/lab.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand" href="/" lang="en" dir="ltr"><span class="brand-mark" aria-hidden="true">M</span>MOBO<span>HUB</span></a>
+      <button id="logout" type="button" hidden>خروج</button>
+    </div>
+  </header>
+  <main id="app" class="shell" aria-busy="true"></main>
+  <template id="signin">
+    <form class="panel login">
+      <h1>ورود مدیر</h1>
+      <label>رمز عبور<input name="password" type="password" autocomplete="current-password" required></label>
+      <button class="primary">ورود</button>
+      <p class="notice" role="status"></p>
+    </form>
+  </template>
+  <template id="dashboard">
+    <section aria-labelledby="page-title">
+      <h1 id="page-title">تست اشتراک</h1>
+      <form id="feed-form" class="panel feed-form">
+        <label class="url-field">لینک اشتراک<input name="url" type="password" dir="ltr" autocomplete="off" placeholder="https://" required maxlength="4096"></label>
+        <label>نام اختیاری<input name="name" maxlength="80" placeholder="نام اشتراک"></label>
+        <label>اتصال شبکه<select name="iface" required></select></label>
+        <fieldset class="choice">
+          <legend>دورهٔ اجرا</legend>
+          <label><input type="radio" name="hours" value="12"><span>هر ۱۲ ساعت</span></label>
+          <label><input type="radio" name="hours" value="24" checked><span>هر ۲۴ ساعت</span></label>
+        </fieldset>
+        <button class="primary" type="submit">ذخیرهٔ اشتراک</button>
+      </form>
+      <p id="policy-notice" class="notice error" hidden>سرویس تست اشتراک فعال نیست.</p>
+      <p id="notice" class="notice" role="status"></p>
+    </section>
+    <section aria-labelledby="feeds-title">
+      <h2 id="feeds-title">اشتراک‌ها</h2>
+      <div id="feeds" class="feed-grid"></div>
+    </section>
+    <section aria-labelledby="history-title">
+      <div class="section-heading">
+        <h2 id="history-title">تاریخچهٔ تست</h2>
+        <button id="clear-history" class="danger" type="button">پاک‌کردن تاریخچه</button>
+      </div>
+      <div id="rounds"></div>
+      <button id="older" class="older" type="button" hidden>نمایش دورهای قدیمی‌تر</button>
+    </section>
+    <dialog id="delete-feed-dialog" aria-labelledby="delete-feed-title">
+      <form id="delete-feed-form">
+        <h2 id="delete-feed-title">حذف اشتراک</h2>
+        <p data-description></p>
+        <p class="notice error" role="alert"></p>
+        <div class="actions">
+          <button type="submit" class="danger">حذف اشتراک</button>
+          <button type="button" data-dismiss autofocus>انصراف</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="history-dialog" aria-labelledby="clear-title">
+      <form id="history-form">
+        <h2 id="clear-title">پاک‌کردن تاریخچه</h2>
+        <label>اشتراک<select name="feed"></select></label>
+        <p id="clear-preview" role="status"></p>
+        <div class="actions">
+          <button type="submit" class="danger" disabled>تأیید حذف</button>
+          <button type="button" data-dismiss>انصراف</button>
+        </div>
+      </form>
+    </dialog>
+  </template>
+</body>
+</html>

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+echo 'Preserve an online database backup and separate identity backup before upgrading.'
+exec "$(dirname "$0")/install"

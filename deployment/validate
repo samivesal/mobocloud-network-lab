@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+curl -q --fail --silent --noproxy '*' --max-time 5 "http://127.0.0.1:${LAB_PORT:-8765}/health" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["worker_alive"] else 1)'

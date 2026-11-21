@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+[ "${1:-}" = "--remove-unit" ] || { echo 'Pass --remove-unit to stop and uninstall the named service. Data and releases are preserved.'; exit 2; }
+systemctl disable --now mobohub-lab.service
+rm -f /etc/systemd/system/mobohub-lab.service
+systemctl daemon-reload

@@ -1,0 +1,32 @@
+[Unit]
+Description=MoboHub Network Lab
+After=network.target
+[Service]
+Type=simple
+User=mobohub-lab
+Group=mobohub-lab
+WorkingDirectory=/opt/mobohub-lab/current
+EnvironmentFile=/etc/mobohub-network-lab/settings
+Environment=LAB_DATA=/var/lib/mobohub-network-lab
+Environment=LAB_KEY_DIR=/etc/mobohub-network-lab/keys
+ExecStart=/opt/mobohub-lab/current/.venv/bin/python -m lab.main serve
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=95
+UMask=0077
+StateDirectory=mobohub-network-lab
+StateDirectoryMode=0700
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+MemoryMax=384M
+TasksMax=64
+[Install]
+WantedBy=multi-user.target

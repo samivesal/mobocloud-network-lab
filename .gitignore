@@ -1,0 +1,16 @@
+var/
+.venv/
+__pycache__/
+*.pyc
+*.sqlite*
+*.db
+*.pem
+*.key
+identity.json
+.env
+.env.*
+!.env.example
+*.bundle
+/.agents/
+/.aws/
+/.codex/
