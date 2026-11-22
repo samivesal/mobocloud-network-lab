@@ -61,12 +61,11 @@
           <label>نام کاربری SSH<input name="username" dir="ltr" value="root" required maxlength="32"></label>
           <label>پورت SSH<input name="ssh_port" type="number" dir="ltr" value="22" min="1" max="65535" required></label>
           <label>پورت API محلی سرور خارج<input name="api_port" type="number" dir="ltr" value="8876" min="1024" max="65535" required></label>
-          <label class="relay-wide">اثر انگشت کلید سرور SSH
-            <input name="fingerprint" dir="ltr" placeholder="SHA256:…" required maxlength="50">
-            <span class="muted">روی سرور خارج اجرا کن: <bdi><code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code></bdi></span>
-          </label>
           <label>رمز SSH<input name="password" type="password" dir="ltr" maxlength="512" autocomplete="new-password"></label>
-          <label>یا فایل کلید خصوصی SSH<input name="private_key" type="file"></label>
+          <details class="relay-key-option">
+            <summary>ورود با کلید خصوصی (اختیاری)</summary>
+            <label>فایل کلید خصوصی SSH<input name="private_key" type="file"></label>
+          </details>
           <label>توکن ربات تلگرام<input name="bot_token" type="password" dir="ltr" required maxlength="121" autocomplete="new-password"></label>
           <label>شناسهٔ عددی چت خصوصی<input name="chat_id" inputmode="numeric" dir="ltr" pattern="[0-9]+" required maxlength="16"></label>
           <div class="actions relay-wide">
@@ -76,6 +75,18 @@
         </form>
       </details>
     </section>
+    <dialog id="telegram-host-dialog" aria-labelledby="telegram-host-title">
+      <form method="dialog">
+        <h2 id="telegram-host-title">تأیید هویت سرور SSH</h2>
+        <p data-host-message></p>
+        <p class="relay-wide"><bdi><code data-host-key></code></bdi></p>
+        <p class="muted">قبل از تأیید، این اثر انگشت را با کلید SSH در کنسول سرور خارج مقایسه کن.</p>
+        <div class="actions">
+          <button type="submit" value="cancel" autofocus>انصراف</button>
+          <button class="primary" type="submit" value="confirm">تأیید و نصب</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="delete-feed-dialog" aria-labelledby="delete-feed-title">
       <form id="delete-feed-form">
         <h2 id="delete-feed-title">حذف اشتراک</h2>

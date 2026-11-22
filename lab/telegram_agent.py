@@ -40,10 +40,13 @@ class RelayError(ValueError):
     pass
 
 
-class Setup(BaseModel):
+class HostTarget(BaseModel):
     server: str = Field(min_length=1, max_length=45)
-    username: str = Field(default="root", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
     ssh_port: int = Field(default=22, ge=1, le=65535)
+
+
+class Setup(HostTarget):
+    username: str = Field(default="root", pattern=r"^[a-z_][a-z0-9_-]{0,31}$")
     api_port: int = Field(default=8876, ge=1024, le=65535)
     fingerprint: str = Field(pattern=r"^SHA256:[A-Za-z0-9+/]{43}$")
     password: SecretStr = Field(default=SecretStr(""), max_length=512)
@@ -72,9 +75,26 @@ def child(args, *, payload=None, timeout=20, env=None, error="relay_unavailable"
     return call.stdout
 
 
-def pinned_host(server, port, fingerprint):
+def public_server(server):
+    try:
+        address = ipaddress.ip_address(server.strip())
+    except ValueError:
+        raise RelayError("relay_invalid_server") from None
+    if not address.is_global or address.is_multicast or "%" in str(address):
+        raise RelayError("relay_invalid_server")
+    return str(address)
+
+
+def host_key_fingerprint(encoded):
+    digest = hashlib.sha256(base64.b64decode(encoded, validate=True)).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
+
+def scan_host_keys(server, port):
     keys = child(["ssh-keyscan", "-T", "6", "-p", str(port), server],
                  timeout=12, error="relay_ssh_unreachable")
+    host = server if port == 22 else f"[{server}]:{port}"
+    found = {}
     for line in keys.decode("ascii", errors="ignore").splitlines():
         fields = line.split()
         if len(fields) != 3 or fields[0].startswith("#"):
@@ -83,13 +103,19 @@ def pinned_host(server, port, fingerprint):
         if not re.fullmatch(r"[a-zA-Z0-9@._+-]+", algorithm):
             continue
         try:
-            digest = hashlib.sha256(base64.b64decode(encoded, validate=True)).digest()
+            fingerprint = host_key_fingerprint(encoded)
         except ValueError:
             continue
-        actual = "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
-        if secrets.compare_digest(actual, fingerprint):
-            host = server if port == 22 else f"[{server}]:{port}"
-            return f"{host} {algorithm} {encoded}\n"
+        found[fingerprint] = (algorithm, f"{host} {algorithm} {encoded}\n")
+    if not found:
+        raise RelayError("relay_ssh_unreachable")
+    return found
+
+
+def pinned_host(server, port, fingerprint):
+    found = scan_host_keys(server, port)
+    if fingerprint in found:
+        return found[fingerprint][1]
     raise RelayError("relay_fingerprint_mismatch")
 
 
@@ -109,19 +135,13 @@ def secret_file(path, value, mode=0o600):
 
 
 def provision(form):
-    try:
-        address = ipaddress.ip_address(form.server.strip())
-    except ValueError:
-        raise RelayError("relay_invalid_server") from None
-    if not address.is_global or address.is_multicast or "%" in str(address):
-        raise RelayError("relay_invalid_server")
+    server = public_server(form.server)
     password, key = form.password.get_secret_value(), form.private_key.get_secret_value()
     if bool(password) == bool(key) or any(c in password for c in "\r\n\0"):
         raise RelayError("relay_ssh_credentials")
     token = form.bot_token.get_secret_value()
     if not re.fullmatch(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,100}", token):
         raise RelayError("relay_invalid_token")
-    server = str(address)
     known = pinned_host(server, form.ssh_port, form.fingerprint)
     configuration = dict(server=server, ssh_port=form.ssh_port, api_port=form.api_port,
                          known=known, link_id=secrets.token_hex(16), secret=secrets.token_hex(32),
@@ -213,6 +233,25 @@ class Relay:
         rows = self.store.rows("select last_ok,error from telegram_link where id=1")
         return dict(configured=bool(rows), **(rows[0] if rows else {}))
 
+    def host_key(self, target):
+        server = public_server(target.server)
+        found = scan_host_keys(server, target.ssh_port)
+        previous = None
+        rows = self.store.rows("select secret from telegram_link where id=1")
+        if rows:
+            try:
+                saved = json.loads(self.store.cipher.decrypt(rows[0]["secret"]))
+                if (saved["server"], saved["ssh_port"]) == (server, target.ssh_port):
+                    previous = host_key_fingerprint(saved["known"].split()[2])
+            except (InvalidToken, ValueError, TypeError, KeyError, IndexError):
+                pass
+
+        if previous in found:
+            return dict(fingerprint=previous, algorithm=found[previous][0], trusted=True, changed=False)
+        fingerprint = next((fp for fp, (algorithm, _) in found.items() if algorithm == "ssh-ed25519"),
+                           next(iter(found)))
+        return dict(fingerprint=fingerprint, algorithm=found[fingerprint][0], trusted=False, changed=previous is not None)
+
     def connect(self, form):
         lock_path = self.store.path.with_name("telegram-setup.lock")
         with lock_path.open("a") as lock:
@@ -300,6 +339,13 @@ def routes(api, relay):
     def status():
         return relay.status()
 
+    @api.post("/telegram/host-key")
+    def host_key(target:HostTarget):
+        try:
+            return relay.host_key(target)
+        except RelayError as exc:
+            raise HTTPException(422,str(exc)) from None
+
     @api.post("/telegram/setup")
     def connect(form:Setup):
         try:
@@ -319,7 +365,16 @@ if __name__ == "__main__":
         username = input("SSH username [root]: ").strip() or "root"
         ssh_port = input("SSH port [22]: ").strip() or "22"
         api_port = input("Loopback API port [8876]: ").strip() or "8876"
-        fingerprint = input("SSH host fingerprint (SHA256:...): ").strip()
+        identity = json.loads((KEY/"identity.json").read_text())
+        relay = Relay(Store(DATA/"lab.sqlite",identity["key"].encode()))
+        target = relay.host_key(HostTarget(server=server, ssh_port=ssh_port))
+        fingerprint = target["fingerprint"]
+        if not target["trusted"]:
+            if target["changed"]:
+                print("The saved SSH host key has changed.")
+            print(f"SSH host key for {server}:{ssh_port} ({target['algorithm']}): {fingerprint}")
+            if input("Compare with your server console. Use this host key? [y/N]: ").strip().lower() not in ("y", "yes"):
+                raise SystemExit("Cancelled.")
         key_path = input("Admin SSH private key file (Enter for SSH password): ").strip()
         key = Path(key_path).expanduser().read_text() if key_path else ""
         password = "" if key else getpass.getpass("SSH password: ")
@@ -327,8 +382,7 @@ if __name__ == "__main__":
         chat = input("Numeric Telegram private chat ID: ").strip()
         form = Setup(server=server,username=username,ssh_port=ssh_port,api_port=api_port,
                      fingerprint=fingerprint,password=password,private_key=key,bot_token=token,chat_id=chat)
-        identity = json.loads((KEY/"identity.json").read_text())
-        Relay(Store(DATA/"lab.sqlite",identity["key"].encode())).connect(form)
+        relay.connect(form)
         print("Telegram relay connected. Open the bot and send /test.")
     except (EOFError, KeyboardInterrupt):
         raise SystemExit("Cancelled.") from None

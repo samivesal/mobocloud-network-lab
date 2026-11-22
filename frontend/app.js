@@ -15,8 +15,8 @@ const escape = value => String(value ?? "").replace(/[&<>"']/g, char =>
 const errors = {
   relay_invalid_server: "آی‌پی عمومی معتبر سرور خارج را وارد کن.",
   relay_ssh_unreachable: "دستگاه ایران نتوانست به SSH سرور خارج برسد.",
-  relay_fingerprint_mismatch: "اثر انگشت SSH با کلید سرور هم‌خوانی ندارد.",
-  relay_ssh_credentials: "فقط یکی از رمز SSH یا فایل کلید را وارد کن.",
+  relay_fingerprint_mismatch: "کلید SSH سرور از زمان تأیید تغییر کرده است. دوباره اتصال را بررسی کن.",
+  relay_ssh_credentials: "رمز SSH یا فایل کلید خصوصی را وارد کن. فقط یکی لازم است.",
   relay_invalid_token: "فرمت توکن ربات تلگرام معتبر نیست.",
   relay_ssh_tools_unavailable: "ابزارهای SSH روی دستگاه ایران در دسترس نیستند.",
   relay_setup_failed: "نصب ربات انجام نشد. دسترسی SSH مدیر، Python، systemd و چت خصوصی تلگرام را بررسی کن.",
@@ -367,6 +367,7 @@ function bindTelegram() {
   const panel = document.querySelector("#telegram-panel");
   const form = document.querySelector("#telegram-form");
   const status = document.querySelector("#telegram-status");
+  const hostDialog = document.querySelector("#telegram-host-dialog");
   const button = form.querySelector("[type=submit]");
   const show = (message, error = false) => {
     status.textContent = message;
@@ -376,6 +377,17 @@ function bindTelegram() {
     if (data.error) show(errorText(data.error), true);
     else if (data.last_ok) show("آخرین ارتباط موفق: " + date.format(data.last_ok * 1000));
     else show("ربات هنوز متصل نشده است.");
+  }
+  function confirmHost(host, server, port) {
+    hostDialog.querySelector("[data-host-message]").textContent = host.changed
+      ? `کلید ذخیره‌شده برای ${server} روی پورت ${port} تغییر کرده است.`
+      : `اولین اتصال به ${server} روی پورت ${port}`;
+    hostDialog.querySelector("[data-host-key]").textContent = `${host.algorithm} ${host.fingerprint}`;
+    hostDialog.returnValue = "";
+    return new Promise(resolve => {
+      hostDialog.addEventListener("close", () => resolve(hostDialog.returnValue === "confirm"), {once: true});
+      hostDialog.showModal();
+    });
   }
   panel.ontoggle = async () => {
     if (!panel.open || button.disabled) return;
@@ -389,15 +401,24 @@ function bindTelegram() {
     event.preventDefault();
     if (button.disabled) return;
     button.disabled = true;
-    show("در حال اتصال به سرور خارج و نصب ربات…");
+    show("در حال بررسی اتصال SSH…");
     try {
       const data = new FormData(form);
       const file = form.elements.private_key.files[0];
-      if (file && file.size > 32768) throw new Error("relay_ssh_credentials");
+      const password = data.get("password");
+      if (Boolean(file) === Boolean(password) || (file && file.size > 32768)) {
+        throw new Error("relay_ssh_credentials");
+      }
+      const target = {server: data.get("server").trim(), ssh_port: Number(data.get("ssh_port"))};
+      const host = await api("telegram/host-key", "POST", target);
+      if (!host.trusted && !await confirmHost(host, target.server, target.ssh_port)) {
+        show("نصب لغو شد.");
+        return;
+      }
+      show("در حال اتصال به سرور خارج و نصب ربات…");
       await api("telegram/setup", "POST", {
-        server: data.get("server").trim(), username: data.get("username").trim(),
-        ssh_port: Number(data.get("ssh_port")), api_port: Number(data.get("api_port")),
-        fingerprint: data.get("fingerprint").trim(), password: data.get("password"),
+        ...target, username: data.get("username").trim(), api_port: Number(data.get("api_port")),
+        fingerprint: host.fingerprint, password,
         private_key: file ? await file.text() : "", bot_token: data.get("bot_token").trim(),
         chat_id: Number(data.get("chat_id"))
       });

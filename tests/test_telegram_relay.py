@@ -16,7 +16,7 @@ from lab.config import parse
 from lab.feeds import refresh
 from lab.store import Store
 from lab import telegram_remote
-from lab.telegram_agent import Relay, RelayError, Setup, pinned_host, provision
+from lab.telegram_agent import HostTarget, Relay, RelayError, Setup, pinned_host, provision
 from lab.telegram_bridge import SCHEMA, apply_update, database, synchronize
 from tests.test_lab import URI
 
@@ -36,6 +36,38 @@ class TelegramRelayTests(unittest.TestCase):
                              f"[198.51.100.4]:2222 ssh-ed25519 {encoded}\n")
             with self.assertRaisesRegex(RelayError, "relay_fingerprint_mismatch"):
                 pinned_host("198.51.100.4",2222,"SHA256:"+"A"*43)
+
+    def test_host_discovery_prefers_ed25519_and_reuses_only_matching_saved_key(self):
+        target = HostTarget(server="198.51.100.4", ssh_port=2222)
+        rsa_key = base64.b64encode(b"fixture-rsa").decode()
+        ed_key = base64.b64encode(b"fixture-ed").decode()
+        ed_fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(b"fixture-ed").digest()).decode().rstrip("=")
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch("lab.telegram_agent.public_server", return_value=target.server),
+              patch("lab.telegram_agent.child") as run):
+            store = Store(Path(tmp) / "db", Fernet.generate_key())
+            relay = Relay(store)
+            run.return_value = f"host ssh-rsa {rsa_key}\nhost ssh-ed25519 {ed_key}\n".encode()
+            expected = dict(fingerprint=ed_fingerprint, algorithm="ssh-ed25519", trusted=False, changed=False)
+            self.assertEqual(relay.host_key(target), expected)
+            run.assert_called_once_with(["ssh-keyscan", "-T", "6", "-p", "2222", target.server],
+                                        timeout=12, error="relay_ssh_unreachable")
+            saved = dict(server=target.server, ssh_port=target.ssh_port,
+                         known=f"[{target.server}]:2222 ssh-ed25519 {ed_key}\n")
+            with store.db(True) as db:
+                db.execute("insert into telegram_link(id,secret) values(1,?)",
+                           (store.cipher.encrypt(json.dumps(saved).encode()),))
+            self.assertEqual(relay.host_key(target), dict(expected, trusted=True))
+
+            run.return_value = f"host ssh-rsa {rsa_key}\n".encode()
+            known = relay.host_key(target)
+            self.assertEqual((known["algorithm"], known["trusted"], known["changed"]), ("ssh-rsa", False, True))
+            run.reset_mock()
+            form = Setup(**target.model_dump(), fingerprint=ed_fingerprint, password="fixture-admin",
+                         bot_token="12345:fixtureBotToken0123456", chat_id=42)
+            with self.assertRaisesRegex(RelayError, "relay_fingerprint_mismatch"):
+                provision(form)
+            self.assertEqual([call.args[0][0] for call in run.call_args_list], ["ssh-keyscan"])
 
     def test_setup_sends_secrets_through_ssh_and_checks_restricted_connection(self):
         form = Setup(server="198.51.100.4", fingerprint="SHA256:" + "A" * 43,
