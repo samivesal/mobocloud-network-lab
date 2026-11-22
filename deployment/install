@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 umask 077
+PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin
+export PATH
 start=0
 case "${1-}" in
     --start) start=1; shift ;;
@@ -14,7 +16,13 @@ if [ "$start" = 1 ]; then
     apt-get update
     apt-get install -y ca-certificates curl python3-venv
 fi
-for cmd in python3 curl systemctl runuser; do command -v "$cmd" >/dev/null; done
+for cmd in python3 curl systemctl runuser useradd; do
+    if ! command -v "$cmd" >/dev/null; then
+        printf 'Mobocloud installation stopped: required command not found: %s\n' "$cmd" >&2
+        exit 1
+    fi
+done
+printf '%s\n' 'آماده‌سازی نسخهٔ Mobocloud…'
 src=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 base=/opt/mobohub-lab
 conf=/etc/mobohub-network-lab
