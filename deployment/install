@@ -63,20 +63,21 @@ if [ ! -f "$conf/keys/identity.json" ]; then
 fi
 (cd "$dest" && runuser -u mobohub-lab -- .venv/bin/python -B -c 'import lab.main, lab.runner')
 install -m 0644 "$src/deployment/mobohub-lab.service" /etc/systemd/system/mobohub-lab.service
-install -m 0755 "$src/deployment/mobohub" /usr/local/bin/mobohub
+install -m 0755 "$src/deployment/mobohub" /usr/local/bin/mobocloud
+ln -sfnT mobocloud /usr/local/bin/mobohub
 ln -s "$dest" "$base/.current-$release"
 mv -Tf "$base/.current-$release" "$base/current"
 systemctl daemon-reload
 if [ "$start" = 1 ]; then
     systemctl restart mobohub-lab.service
     for retry in 1 2 3 4 5 6 7 8 9 10; do
-        if systemctl is-active --quiet mobohub-lab.service && /usr/local/bin/mobohub health 2>/dev/null; then
-            printf 'پنل وب: %s\nمدیریت ترمینالی: sudo mobohub\n' "$(/usr/local/bin/mobohub address)"
+        if systemctl is-active --quiet mobohub-lab.service && /usr/local/bin/mobocloud health 2>/dev/null; then
+            printf 'پنل وب: %s\nمدیریت ترمینالی: sudo mobocloud\n' "$(/usr/local/bin/mobocloud address)"
             exit 0
         fi
         sleep 1
     done
-    echo 'Panel health check failed. See: sudo mobohub logs' >&2
+    echo 'Panel health check failed. See: sudo mobocloud logs' >&2
     exit 1
 else
     echo 'Release installed. Start it with: systemctl start mobohub-lab'

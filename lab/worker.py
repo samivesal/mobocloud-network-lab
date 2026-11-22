@@ -127,7 +127,7 @@ class Worker:
         summary=False
         if rows:
             a=rows[0]
-            message=f"MoboHub {a['event']} · {a['product']} #{a['config']} · {self.store.agent} · incident {a['incident']}"
+            message=f"Mobocloud {a['event']} · {a['product']} #{a['config']} · {self.store.agent} · incident {a['incident']}"
         elif os.getenv("LAB_SEND_SUMMARIES")=="1":
             rows=self.store.rows("select * from summaries where delivery='pending' and due<=? order by id limit 1",(time.time(),))
             if not rows:
@@ -135,7 +135,7 @@ class Worker:
             a=rows[0]
             stats=json.loads(a["totals"])
             summary=True
-            message=f"MoboHub {a['period']} · {self.store.agent} · UTC {a['start']}–{a['end']} · successful checks {stats['successes']}/{stats['checks']}"
+            message=f"Mobocloud {a['period']} · {self.store.agent} · UTC {a['start']}–{a['end']} · successful checks {stats['successes']}/{stats['checks']}"
         else:
             return
         try:

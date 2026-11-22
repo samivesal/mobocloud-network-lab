@@ -1,5 +1,5 @@
 [Unit]
-Description=MoboHub Network Lab
+Description=Mobocloud Network Lab
 After=network.target
 [Service]
 Type=simple

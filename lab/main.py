@@ -93,7 +93,7 @@ def create():
                 worker.stop.set()
                 thread.join()
 
-    app=FastAPI(title="MoboHub Network Lab",lifespan=lifetime,openapi_url=None,docs_url=None,redoc_url=None)
+    app=FastAPI(title="Mobocloud Network Lab",lifespan=lifetime,openapi_url=None,docs_url=None,redoc_url=None)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(req,exc):
