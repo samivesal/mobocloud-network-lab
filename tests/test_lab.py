@@ -149,8 +149,16 @@ class TransportTests(unittest.TestCase):
     def test_crashed_engine(self):
         with self.assertRaisesRegex(Failure,"engine_start"),proxy(parse(URI),"/bin/false"):pass
     def test_suspended_cleanup(self):
-        with proxy(parse(URI),ENGINE) as port:
-            from lab.runner import owns_listener
-            pid=next(int(p.name) for p in Path("/proc").iterdir() if p.name.isdigit() and p.stat().st_uid==os.getuid() and owns_listener(int(p.name),port.port))
-            os.kill(pid,signal.SIGSTOP)
-        self.assertFalse(Path(f"/proc/{pid}").exists())
+        start_process = subprocess.Popen
+        children = []
+
+        def start_fixture(*args, **kwargs):
+            child = start_process(*args, **kwargs)
+            children.append(child)
+            return child
+
+        with patch("lab.runner.subprocess.Popen", side_effect=start_fixture):
+            with proxy(parse(URI), ENGINE):
+                child = children[-1]
+                child.send_signal(signal.SIGSTOP)
+        self.assertIsNotNone(child.poll())
