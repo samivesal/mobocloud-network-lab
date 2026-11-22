@@ -6,13 +6,22 @@ Mobocloud یک پنل مدیریت محلی برای بررسی کانفیگ‌�
 
 ## نصب و اجرای پنل روی Debian 13
 
-این یک خط را در ترمینال **سیستم مقصد** اجرا کنید. پیش‌نیازها Debian 13 با systemd، دسترسی sudo، اینترنت و حساب GitHub دارای دسترسی به مخزن خصوصی هستند.
+بعد از عمومی‌شدن مخزن با نام `mobocloud-network-lab` این یک خط را در ترمینال سیستم مقصد اجرا کنید. نصب عمومی به حساب GitHub نیاز ندارد. پیش‌نیازها Debian 13 با systemd، دسترسی root یا sudo، اینترنت و `curl` هستند.
+
+```sh
+( set -e; f=$(mktemp); trap 'rm -f -- "$f"' EXIT; curl -fsSL --proto '=https' --proto-redir '=https' https://raw.githubusercontent.com/samivesal/mobocloud-network-lab/main/install.sh -o "$f"; sh "$f" )
+```
+
+<details>
+<summary>نصب تا زمانی که مخزن خصوصی و با نام قبلی است</summary>
 
 ```sh
 ( set -eu; . /etc/os-release; [ "$ID:$VERSION_ID" = debian:13 ] || { echo "Debian 13 required" >&2; exit 1; }; if ! command -v gh >/dev/null; then sudo apt-get update && sudo apt-get install -y gh; fi; gh auth status --hostname github.com >/dev/null 2>&1 || gh auth login --hostname github.com --web --git-protocol https; work=$(mktemp -d); trap 'rm -rf -- "$work"' EXIT; gh api --hostname github.com repos/samivesal/mobohub-network-lab/tarball/main > "$work/source.tgz"; tar -xzf "$work/source.tgz" --strip-components=1 -C "$work"; sudo "$work/deployment/install" --start )
 ```
 
-اگر اولین بار است، دستور ورود به GitHub را در مرورگر شروع می‌کند. نصب‌کننده در صورت نیاز Xray را از انتشار رسمی GitHub دریافت می‌کند و پس از بررسی SHA-256 نصب می‌کند. در نصب اول، اگر می‌خواهید تست زندهٔ اشتراک فعال باشد، به پرسش Cloudflare پاسخ `y` بدهید و یک رمز مدیر با حداقل **۱۲ کاراکتر** تعیین کنید. آدرس پیش‌فرض [پنل وب](http://127.0.0.1:8765) است و آدرس واقعی پس از نصب در ترمینال نمایش داده می‌شود. برای دسترسی از دستگاه دیگر می‌توانید از تونل SSH استفاده کنید.
+</details>
+
+نصب‌کننده در صورت نیاز Xray را از انتشار رسمی GitHub دریافت می‌کند و پس از بررسی SHA-256 نصب می‌کند. در نصب اول، اگر می‌خواهید تست زندهٔ اشتراک فعال باشد، به پرسش Cloudflare پاسخ `y` بدهید و یک رمز مدیر با حداقل **۱۲ کاراکتر** تعیین کنید. آدرس پیش‌فرض [پنل وب](http://127.0.0.1:8765) است و آدرس واقعی پس از نصب در ترمینال نمایش داده می‌شود. برای دسترسی از دستگاه دیگر می‌توانید از تونل SSH استفاده کنید.
 
 برای دیدن وضعیت سرویس، گزارش‌ها، بازراه‌اندازی یا ویرایش تنظیمات، منوی ترمینال را با `sudo mobocloud` باز کنید. دستور قبلی `sudo mobohub` هم منو را باز می‌کند. تغییر تنظیمات از گزینهٔ «ویرایش تنظیمات» و اعمال آن از گزینهٔ «راه‌اندازی مجدد» انجام می‌شود.
 
