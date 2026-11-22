@@ -27,6 +27,16 @@ class GuardTests(unittest.TestCase):
             process.communicate.return_value=(json.dumps(timing).encode(),None)
             self.assertIsNone(probe("https://localhost",local_fixture=True)["response_ms"])
 
+            timing.update(http_code=200,size_upload=100,time_posttransfer=.62)
+            process.communicate.return_value=(json.dumps(timing).encode(),None)
+            upload=probe("https://localhost",kind="upload",size=100,local_fixture=True,
+                         timeout=60,connect_timeout=20)
+            self.assertAlmostEqual(upload["transfer_ms"],30)
+            self.assertAlmostEqual(upload["mbps"],800/.63/1e6)
+            args=popen.call_args.args[0]
+            self.assertEqual(args[args.index("--max-time")+1],"60")
+            self.assertEqual(args[args.index("--connect-timeout")+1],"20")
+
     def test_no_unapproved_dns(self):
         with patch("socket.getaddrinfo") as dns,self.assertRaisesRegex(Failure,"peer_unapproved"):
             pinned(parse(URI),[])

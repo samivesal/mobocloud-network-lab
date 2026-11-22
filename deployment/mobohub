@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+service=mobohub-lab.service
+settings=/etc/mobohub-network-lab/settings
+
+address() {
+    port=
+    if [ -r "$settings" ]; then
+        port=$(sed -nE "s/^[[:space:]]*LAB_PORT[[:space:]]*=[[:space:]]*['\"]?([0-9]{1,5})['\"]?[[:space:]]*$/\1/p" "$settings" | tail -n 1)
+    fi
+    printf 'http://127.0.0.1:%s\n' "${port:-8765}"
+}
+
+action() {
+    case "$1" in
+        status) systemctl --no-pager status "$service" ;;
+        address) address ;;
+        health)
+            curl -q --fail --silent --noproxy '*' --max-time 2 "$(address)/health" |
+                python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["worker_alive"] else 1)'
+            ;;
+        logs) journalctl --no-pager -u "$service" -n 60 ;;
+        restart) systemctl restart "$service" ;;
+        settings)
+            "${EDITOR:-editor}" "$settings" || return "$?"
+            printf '%s\n' 'برای اعمال تنظیمات، سرویس را راه‌اندازی مجدد کنید.'
+            ;;
+        *) printf '%s\n' 'Usage: mobohub [status|address|health|logs|restart|settings]' >&2; return 2 ;;
+    esac
+}
+
+if [ "$#" -gt 0 ]; then
+    action "$1"
+    exit
+fi
+
+while :; do
+    printf '\nMoboHub · %s\n' "$(address)"
+    printf '%s\n' '۱) وضعیت سرویس' '۲) گزارش سرویس' '۳) راه‌اندازی مجدد' '۴) ویرایش تنظیمات' '۰) خروج'
+    printf '%s' 'انتخاب: '
+    IFS= read -r choice || break
+    case "$choice" in
+        1|۱) action status || : ;;
+        2|۲) action logs || : ;;
+        3|۳) action restart || : ;;
+        4|۴) action settings || : ;;
+        0|۰) break ;;
+        *) printf '%s\n' 'یکی از گزینه‌های منو را وارد کنید.' ;;
+    esac
+done

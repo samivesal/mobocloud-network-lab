@@ -146,9 +146,15 @@ def routes(api,store):
                     json_extract(s.result,'$.ping_ms') ping_ms,
                     json_extract(s.result,'$.ping_method') ping_method,
                     json_extract(s.result,'$.ping_error') ping_error,
+                    json_extract(s.result,'$.ping_sample_ok') ping_sample_ok,
+                    json_extract(s.result,'$.ping_sample_total') ping_sample_total,
+                    json_extract(s.result,'$.sample_ok') download_sample_ok,
+                    json_extract(s.result,'$.sample_total') download_sample_total,
                     json_extract(s.result,'$.upload.ok') upload_ok,
                     json_extract(s.result,'$.upload.mbps') upload_mbps,
-                    json_extract(s.result,'$.upload.error') upload_error
+                    json_extract(s.result,'$.upload.error') upload_error,
+                    json_extract(s.result,'$.upload.sample_ok') upload_sample_ok,
+                    json_extract(s.result,'$.upload.sample_total') upload_sample_total
                     from feed_jobs f join jobs j on j.id=f.job left join samples s on s.job=j.id
                     where f.round between ? and ? order by j.id""",(min(by_id),max(by_id))):
                     by_id[row["round"]]["results"].append(dict(row))

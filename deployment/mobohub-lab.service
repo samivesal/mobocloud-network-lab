@@ -9,6 +9,7 @@ WorkingDirectory=/opt/mobohub-lab/current
 EnvironmentFile=/etc/mobohub-network-lab/settings
 Environment=LAB_DATA=/var/lib/mobohub-network-lab
 Environment=LAB_KEY_DIR=/etc/mobohub-network-lab/keys
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/opt/mobohub-lab/bin
 ExecStart=/opt/mobohub-lab/current/.venv/bin/python -m lab.main serve
 Restart=on-failure
 RestartSec=5

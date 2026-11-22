@@ -120,11 +120,11 @@ def pinned(out, allowed):
     return result
 
 
-def probe(url, port=None, kind="check", size=0, cap=65536, ca=None, body=False, local_fixture=False, cancelled=lambda: False, iface=None):
+def probe(url, port=None, kind="check", size=0, cap=65536, ca=None, body=False, local_fixture=False, cancelled=lambda: False, iface=None, *, timeout=15, connect_timeout=6):
     u = urlsplit(url)
     if u.scheme!="https" or not u.hostname or u.username or u.password or u.fragment:
         raise Failure("target_invalid")
-    args=["curl","-q","--silent","--proto","=https","--max-time","15","--connect-timeout","6",
+    args=["curl","-q","--silent","--proto","=https","--max-time",str(timeout),"--connect-timeout",str(connect_timeout),
           "--max-filesize",str(cap),"--proxy",f"socks5h://127.0.0.1:{port.port}" if port else "",
           "--noproxy","" if port else "*","--write-out","%{json}"]
     if iface and not port:
@@ -153,7 +153,7 @@ def probe(url, port=None, kind="check", size=0, cap=65536, ca=None, body=False, 
         if cancelled():
             raise Failure("cancelled")
         p=subprocess.Popen(args+["--output",response.name,"--url",url],stdin=payload,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-        deadline=time.monotonic()+18
+        deadline=time.monotonic()+timeout+3
         try:
             while True:
                 try:
@@ -176,10 +176,12 @@ def probe(url, port=None, kind="check", size=0, cap=65536, ca=None, body=False, 
         rx,tx=int(data["size_download"]),int(data["size_upload"])
         ok=p.returncode==0 and 200<=status<300 and (kind!="download" or rx==size) and (kind!="upload" or tx==size)
         total=float(data["time_total"])
+        transfer_ms=max(0,total-data["time_pretransfer"])*1000 if ok and kind!="check" else None
         code={6:"dns",7:"connect",28:"timeout",35:"tls",60:"certificate",63:"size_limit",97:"socks"}.get(p.returncode,"transport" if p.returncode else "response")
         result=dict(ok=ok,error=None if ok else code,status=status,rx=rx,tx=tx,total_ms=total*1000,
                     tls_complete_ms=data["time_appconnect"]*1000,ttfb_ms=data["time_starttransfer"]*1000,
                     response_ms=max(0,data["time_starttransfer"]-data["time_pretransfer"])*1000 if ok else None,
+                    transfer_ms=transfer_ms,
                     proxy_connect_ms=data["time_connect"]*1000 if port else None,
                     mbps=(rx if kind=="download" else tx)*8/total/1e6 if ok and total and kind!="check" else None)
         if body and ok:

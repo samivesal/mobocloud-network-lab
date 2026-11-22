@@ -30,11 +30,11 @@ def require_link(name):
         raise Failure("interface_unavailable")
 
 
-def connect(ip, port, iface):
+def connect(ip, port, iface, timeout=8):
     family=socket.AF_INET6 if ipaddress.ip_address(ip).version==6 else socket.AF_INET
     sock=socket.socket(family,socket.SOCK_STREAM)
     try:
-        sock.settimeout(8)
+        sock.settimeout(timeout)
         sock.setsockopt(socket.SOL_SOCKET,socket.SO_BINDTODEVICE,iface.encode()+b"\0")
         sock.connect((ip,port))
         return sock
@@ -44,7 +44,7 @@ def connect(ip, port, iface):
 
 
 @contextlib.contextmanager
-def tunnel(out,iface):
+def tunnel(out,iface,*,timeout=8):
     if not iface:
         yield out
         return
@@ -61,9 +61,9 @@ def tunnel(out,iface):
     class Relay(socketserver.BaseRequestHandler):
         def handle(self):
             try:
-                with connect(ip,port,iface) as upstream:
+                with connect(ip,port,iface,timeout) as upstream:
                     sockets=[self.request,upstream]
-                    self.request.settimeout(8)
+                    self.request.settimeout(timeout)
                     while sockets and not stopping.is_set():
                         ready,_,_=select.select(sockets,[],[],.25)
                         for src in ready:

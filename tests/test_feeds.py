@@ -126,28 +126,40 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
                         Failure("fixture_baseline_failure"), {"ok": True, "ttfb_ms": 523.5, "response_ms": 23.5},
                         {"ok": True, "mbps": 12.5},
                         {"ok": True, "mbps": 6.5}, Failure("fixture_exit_failure"),
-                        {"ok": True}, Failure("fixture_ping_failure"),
-                        {"ok": True, "mbps": 13}, Failure("fixture_upload_failure"),
+                        {"ok": True},
+                        *[Failure("fixture_ping_failure") for _ in range(5)],
+                        {"ok": True, "transfer_ms": 50},
+                        {"ok": True, "transfer_ms": 100},
+                        Failure("timeout"),
+                        *[Failure("fixture_upload_failure") for _ in range(3)],
                         Failure("fixture_exit_failure"),
                     ]) as probe, patch.dict(os.environ, LAB_IP_URL="https://example.org/ip",
                                               LAB_IP_FALLBACK_URL=""):
                 worker.test(job)
                 endpoints["run_now"](fid, cloudflare_upload=True)
                 refresh(store)
-                with patch.dict(os.environ, LAB_UPLOAD_URL=""):
-                    worker.test(worker.claim())
+                worker.test(worker.claim())
             ping, down, up = probe.call_args_list[1:4]
             self.assertEqual(ping.args, ("https://example.org/check", None))
             self.assertEqual(down.args[2:], ("download", 100000, 100000))
             self.assertEqual(up.args[2:4], ("upload", 200000))
             self.assertEqual(up.args[0], "https://example.org/upload")
-            self.assertEqual(probe.call_args_list[8].args[0], "https://speed.cloudflare.com/__up")
+            baseline, ping, down, up = [probe.call_args_list[i] for i in (5, 6, 11, 14)]
+            self.assertEqual(baseline.args, ("https://speed.cloudflare.com/__down?bytes=0",))
+            self.assertEqual(ping.args, ("https://speed.cloudflare.com/__down?bytes=0", None))
+            self.assertEqual(down.args, ("https://speed.cloudflare.com/__down?bytes=100000", None, "download", 100000, 100000))
+            self.assertEqual(up.args, ("https://speed.cloudflare.com/__up", None, "upload", 200000, 65536))
+            self.assertEqual((ping.kwargs["timeout"], down.kwargs["timeout"], up.kwargs["timeout"]), (30, 60, 60))
+            self.assertEqual(down.kwargs["connect_timeout"], 20)
             failed, succeeded = (batch["results"][0] for batch in endpoints["rounds"]()["rounds"])
             self.assertEqual((succeeded["ping_ms"], succeeded["mbps"], succeeded["upload_mbps"]), (23.5, 12.5, 6.5))
             self.assertEqual(succeeded["ping_method"], "https_response")
             self.assertEqual((failed["ping_ms"], failed["ping_error"], failed["mbps"],
                               failed["upload_mbps"], failed["upload_error"]),
-                             (None, "fixture_ping_failure", 13, None, "fixture_upload_failure"))
+                             (None, "fixture_ping_failure", 12, None, "fixture_upload_failure"))
+            self.assertEqual((failed["ping_sample_ok"], failed["ping_sample_total"],
+                              failed["download_sample_ok"], failed["download_sample_total"],
+                              failed["upload_sample_ok"], failed["upload_sample_total"]), (0, 5, 2, 3, 0, 3))
 
             endpoints["run_now"](fid)
             refresh(store)

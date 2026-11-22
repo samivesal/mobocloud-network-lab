@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+dest=$1
+case "$(dpkg --print-architecture)" in
+    amd64) archive=Xray-linux-64.zip ;;
+    arm64) archive=Xray-linux-arm64-v8a.zip ;;
+    *) echo 'Install Xray for this architecture before running the installer.' >&2; exit 1 ;;
+esac
+
+work=$(mktemp -d)
+trap 'rm -rf -- "$work"' EXIT
+download() {
+    curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 10 --max-time 120 "$@"
+}
+download https://api.github.com/repos/XTLS/Xray-core/releases/latest -o "$work/release.json"
+asset=$(python3 - "$work/release.json" "$archive" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+release = json.loads(Path(sys.argv[1]).read_text())
+for asset in release["assets"]:
+    if asset["name"] == sys.argv[2]:
+        url = asset["browser_download_url"]
+        digest = asset.get("digest") or ""
+        if not url.startswith("https://github.com/XTLS/Xray-core/releases/download/"):
+            break
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
+            break
+        print(url, digest.removeprefix("sha256:"))
+        sys.exit(0)
+sys.exit("No Xray release asset with a verifiable SHA-256 digest.")
+PY
+)
+download "${asset% *}" -o "$work/xray.zip"
+printf '%s  %s\n' "${asset##* }" "$work/xray.zip" | sha256sum --check --status
+python3 - "$work" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+from zipfile import ZipFile
+
+work = Path(sys.argv[1])
+with ZipFile(work / "xray.zip") as archive, archive.open("xray") as source, (work / "xray").open("xb") as target:
+    shutil.copyfileobj(source, target)
+PY
+chmod 0700 "$work/xray"
+"$work/xray" version
+install -m 0755 "$work/xray" "$dest"

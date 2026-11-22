@@ -7,6 +7,7 @@ import threading
 import time
 
 import httpx
+from . import cloudflare
 from .events import emit
 from .runner import Failure, pinned, probe, proxy
 from .store import amount, speed_reservation
@@ -75,17 +76,25 @@ class Worker:
         if size and not subscription and speed_reservation(size)>job["reserved"]:
             raise Failure("budget_changed")
         upload_url=os.getenv("LAB_UPLOAD_URL")
-        if not upload_url and batch and batch[0]["cloudflare_upload"]:
-            upload_url="https://speed.cloudflare.com/__up"
+        cloudflare_test=subscription and batch and batch[0]["cloudflare_upload"]
+        if cloudflare_test:
+            url=cloudflare.DOWNLOAD+"0"
         from .baseline import interface_stats
         def cancelled():
             return self.stop.is_set() or store.rows("select state from jobs where id=?",(job["id"],))[0]["state"]=="cancelling"
         measure=subscription_probe if subscription else probe
-        base=measure(url,cancelled=cancelled,iface=iface)
+        if cloudflare_test:
+            base=measure(url,cancelled=cancelled,iface=iface,timeout=cloudflare.PING_TIMEOUT,
+                         connect_timeout=cloudflare.CONNECT_TIMEOUT)
+        else:
+            base=measure(url,cancelled=cancelled,iface=iface)
         base["interface"]=interface_stats(iface)
-        with tunnel(out,iface) as bound, proxy(bound,os.getenv("LAB_XRAY","xray"),cancelled) as port:
-            target=url if not size else os.environ["LAB_"+kind.upper()+"_URL"]
-            if subscription:
+        relay_options={"timeout":cloudflare.CONNECT_TIMEOUT} if cloudflare_test else {}
+        with tunnel(out,iface,**relay_options) as bound, proxy(bound,os.getenv("LAB_XRAY","xray"),cancelled) as port:
+            if cloudflare_test:
+                result=cloudflare.benchmark(measure,port,size,amount("upload"),cancelled)
+            elif subscription:
+                target=os.environ["LAB_DOWNLOAD_URL"]
                 ping=measure(url,port,cancelled=cancelled)
                 result=measure(target,port,"download",size,size,cancelled=cancelled)
                 result["ping_ms"]=ping.get("response_ms") if ping["ok"] else None
@@ -94,8 +103,10 @@ class Worker:
                 result["upload"]=(measure(upload_url,port,"upload",amount("upload"),65536,cancelled=cancelled) if upload_url
                                   else dict(ok=False,error="subscription_upload_unavailable",mbps=None))
             else:
+                target=url if not size else os.environ["LAB_"+kind.upper()+"_URL"]
                 result=probe(target,port,kind,size,size if kind=="download" else 65536,cancelled=cancelled)
-            result["method"]=hashlib.sha256(("curl-v1:"+url).encode()).hexdigest()[:16]
+            method="cloudflare-v3:" if cloudflare_test else "curl-v1:"
+            result["method"]=hashlib.sha256((method+url).encode()).hexdigest()[:16]
             if result["ok"] and os.getenv("LAB_IP_URL"):
                 for target in filter(None,[os.getenv("LAB_IP_URL"),os.getenv("LAB_IP_FALLBACK_URL")]):
                     ip=measure(target,port,cap=128,body=True,cancelled=cancelled)

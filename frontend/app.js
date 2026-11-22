@@ -5,6 +5,7 @@ const logout = document.querySelector("#logout");
 const number = new Intl.NumberFormat("fa-IR");
 const wholeNumber = new Intl.NumberFormat("fa-IR", {maximumFractionDigits: 0});
 const decimal = new Intl.NumberFormat("fa-IR", {maximumFractionDigits: 2});
+const uploadSpeed = {format: value => value > 0 && value < 1 ? "<" + wholeNumber.format(1) : wholeNumber.format(value)};
 const date = new Intl.DateTimeFormat("fa-IR", {
   dateStyle: "medium", timeStyle: "long"
 });
@@ -19,6 +20,7 @@ const errors = {
   subscription_speed_policy_disabled: "سرویس تست اشتراک فعال نیست.",
   feed_refresh_failed: "دریافت اشتراک ناموفق بود.",
   connection_timeout: "مهلت اتصال تمام شد.",
+  timeout: "مهلت این اندازه‌گیری تمام شد.",
   budget_exhausted: "این تست در نسخهٔ قبلی به‌خاطر سهمیه اجرا نشد.",
   subscription_upload_unavailable: "نشانی تست آپلود روی سرور تنظیم نشده است.",
   subscription_delete_unavailable: "نسخهٔ در حال اجرای سرور از حذف اشتراک پشتیبانی نمی‌کند.",
@@ -132,11 +134,11 @@ function drawFeeds(data) {
            <progress max="${batch.total}" value="${batch.done}" aria-label="پیشرفت تست"></progress></div>`
       : '<p class="progress">در صف دریافت اشتراک</p>') : "";
     return `<article class="panel feed-card">
-      <div class="feed-head"><h3>${escape(feed.name)}</h3><span class="badge ${feed.enabled && !feed.busy ? "success" : "muted"}">${status}</span></div>
+      <div class="feed-head"><h3>${escape(feed.name)}</h3><span class="badge ${feed.busy ? "running" : feed.enabled ? "success" : "muted"}">${status}</span></div>
       <dl><dt>اتصال</dt><dd><bdi>${escape(feed.iface)}</bdi></dd><dt>اجرای بعدی</dt><dd>${feed.enabled ? (feed.due ? time(feed.due) : "در انتظار اجرا") : "—"}</dd></dl>
       ${progress}
       <div class="actions" data-feed="${feed.id}">
-        <button class="primary" data-action="run" data-cloudflare-upload="${data.upload_ready ? "0" : "1"}" ${feed.busy || !data.ready ? "disabled" : ""}>${data.upload_ready ? "همین الان اجرا کن" : "اجرای فوری با آپلود Cloudflare"}</button>
+        <button class="primary" data-action="run" ${feed.busy || !data.ready ? "disabled" : ""}>تست فوری Cloudflare</button>
         <button data-action="toggle" data-enabled="${feed.enabled ? 0 : 1}" ${!feed.enabled && !data.ready ? "disabled" : ""}>${feed.enabled ? "توقف" : "ادامه"}</button>
         <button data-action="delete" class="danger">حذف اشتراک</button>
         <select data-action="period" aria-label="دورهٔ اجرای ${escape(feed.name)}">
@@ -154,21 +156,29 @@ function resultRow(result) {
     ? ({queued:"در صف", running:"در حال تست", cancelling:"در حال توقف"})[result.state]
     : result.ok ? "موفق"
       : errorText(result.error || (result.state === "done" ? "نتیجه در دسترس نیست" : result.state));
-  const metric = (label, value, unit, error, format = decimal) => `<div class="metric">
+  const metric = (label, value, unit, error, samples, total, format = decimal) => `<div class="metric">
     <span class="muted">${label}</span>
-    <span class="speed">${value == null ? "—" : `<bdi dir="ltr"><strong>${format.format(value)}</strong> <small>${unit}</small></bdi>`}</span>
+    <span class="speed">${value == null ? "—" : `<bdi dir="ltr"><strong>${escape(format.format(value))}</strong> <small>${unit}</small></bdi>`}</span>
+    ${total == null ? "" : `<span class="muted metric-samples">${number.format(samples)} از ${number.format(total)} موفق</span>`}
     ${error ? `<span class="error metric-error">${escape(errorText(error))}</span>` : ""}
   </div>`;
-  const statusError = !pending && !result.ok;
+  const tunnelResponded = result.state === "done" &&
+    (result.ping_ms != null || result.ok || result.upload_ok);
   return `<div class="result">
-    <bdi>${escape(result.label)}</bdi>
+    <div class="result-name">
+      <bdi>${escape(result.label)}</bdi>
+      ${tunnelResponded ? '<span class="badge success">پراکسی پاسخ داد</span>' : ""}
+    </div>
     ${time(result.at)}
     <div class="metrics">
-      ${metric(result.ping_ms != null && !result.ping_method ? "زمان پاسخ کامل" : "پینگ", result.ping_ms, "ms", result.ping_error, wholeNumber)}
-      ${metric("دانلود", result.mbps, "Mbps", result.state === "done" ? result.error : null)}
-      ${metric("آپلود", result.upload_mbps, "Mbps", result.upload_error)}
+      ${metric(result.ping_ms != null && !result.ping_method ? "زمان پاسخ کامل" : "پینگ", result.ping_ms, "ms",
+        result.ping_error, result.ping_sample_ok, result.ping_sample_total, wholeNumber)}
+      ${metric("دانلود", result.mbps, "Mbps", result.state === "done" ? result.error : null,
+        result.download_sample_ok, result.download_sample_total)}
+      ${metric("آپلود", result.upload_mbps, "Mbps", result.upload_error,
+        result.upload_sample_ok, result.upload_sample_total, uploadSpeed)}
     </div>
-    ${pending || (statusError && result.state !== "done") ?
+    ${pending || (!result.ok && result.state !== "done") ?
       `<span class="result-status ${pending ? "muted" : "error"}">${escape(status)}</span>` : ""}
   </div>`;
 }
@@ -305,8 +315,7 @@ function bindDashboard() {
     }
     act(async () => {
       if (button.dataset.action === "run") {
-        const query = button.dataset.cloudflareUpload === "1" ? "?cloudflare_upload=true" : "";
-        const round = await api(path + "/run" + query, "POST", {});
+        const round = await api(path + "/run?cloudflare_upload=true", "POST", {});
         notice(round.queued ? "یک دور تست در صف قرار گرفت." : "یک دور تست در صف یا در حال اجراست.");
       } else {
         await api(path + "?enabled=" + (button.dataset.enabled === "1"), "PATCH", {});

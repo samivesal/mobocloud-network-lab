@@ -24,7 +24,16 @@ if [ -e "$state/lab.sqlite" ] && [ ! -s "$conf/keys/identity.json" ]; then
     exit 1
 fi
 if ! id mobohub-lab >/dev/null 2>&1; then useradd --system --user-group --no-create-home --shell /usr/sbin/nologin mobohub-lab; fi
-install -d -m 0755 "$base" "$base/releases"
+install -d -m 0755 "$base" "$base/releases" "$base/bin"
+engine_ready=1
+if [ "$start" = 1 ] && [ ! -x "$base/bin/xray" ] && \
+    ! PATH=/usr/local/bin:/usr/bin:/bin command -v xray >/dev/null &&
+    ! grep -Eq '^[[:space:]]*LAB_XRAY[[:space:]]*=[[:space:]]*[^[:space:]]+' "$conf/settings" 2>/dev/null; then
+    if ! "$src/deployment/install-xray" "$base/bin/xray"; then
+        engine_ready=0
+        echo 'Xray installation failed. The web panel can start. Live tests need Xray.' >&2
+    fi
+fi
 dest=$(mktemp -d "$base/releases/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
 release=${dest##*/}
 cp -r "$src/lab" "$src/frontend" "$src/requirements.txt" "$dest/"
@@ -32,7 +41,21 @@ python3 -m venv "$dest/.venv"
 "$dest/.venv/bin/pip" install -r "$dest/requirements.txt"
 chmod -R a+rX "$dest"
 install -d -m 0750 -g mobohub-lab "$conf" "$conf/keys"
-if [ ! -f "$conf/settings" ]; then install -m 0640 -g mobohub-lab "$src/.env.example" "$conf/settings"; fi
+if [ ! -f "$conf/settings" ]; then
+    sed -e 's|^LAB_CHECK_URL=$|LAB_CHECK_URL=https://speed.cloudflare.com/__down?bytes=0|' \
+        -e 's|^LAB_DOWNLOAD_URL=$|LAB_DOWNLOAD_URL=https://speed.cloudflare.com/__down?bytes=5000000|' \
+        -e 's|^LAB_UPLOAD_URL=$|LAB_UPLOAD_URL=https://speed.cloudflare.com/__up|' \
+        "$src/.env.example" > "$dest/settings.new"
+    if [ "$start" = 1 ] && [ "$engine_ready" = 1 ] && [ -t 0 ]; then
+        printf '%s' 'تست زندهٔ اشتراک‌ها با Cloudflare فعال شود؟ [y/N] '
+        IFS= read -r choice || choice=
+        case "$choice" in
+            y|Y|yes|YES) sed -i -E 's/^(LAB_LIVE|LAB_SPEED|LAB_SCHEDULE)=0$/\1=1/' "$dest/settings.new" ;;
+        esac
+    fi
+    install -m 0640 -g mobohub-lab "$dest/settings.new" "$conf/settings"
+    rm "$dest/settings.new"
+fi
 if [ ! -f "$conf/keys/identity.json" ]; then
  (cd "$dest" && LAB_KEY_DIR="$conf/keys" .venv/bin/python -m lab.main init)
  chgrp mobohub-lab "$conf/keys/identity.json"
@@ -40,13 +63,21 @@ if [ ! -f "$conf/keys/identity.json" ]; then
 fi
 (cd "$dest" && runuser -u mobohub-lab -- .venv/bin/python -B -c 'import lab.main, lab.runner')
 install -m 0644 "$src/deployment/mobohub-lab.service" /etc/systemd/system/mobohub-lab.service
+install -m 0755 "$src/deployment/mobohub" /usr/local/bin/mobohub
 ln -s "$dest" "$base/.current-$release"
 mv -Tf "$base/.current-$release" "$base/current"
 systemctl daemon-reload
 if [ "$start" = 1 ]; then
     systemctl restart mobohub-lab.service
-    systemctl is-active --quiet mobohub-lab.service
-    echo 'Panel running at http://127.0.0.1:8765 (default port; see LAB_PORT in settings).'
+    for retry in 1 2 3 4 5 6 7 8 9 10; do
+        if systemctl is-active --quiet mobohub-lab.service && /usr/local/bin/mobohub health 2>/dev/null; then
+            printf 'پنل وب: %s\nمدیریت ترمینالی: sudo mobohub\n' "$(/usr/local/bin/mobohub address)"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo 'Panel health check failed. See: sudo mobohub logs' >&2
+    exit 1
 else
     echo 'Release installed. Start it with: systemctl start mobohub-lab'
 fi
