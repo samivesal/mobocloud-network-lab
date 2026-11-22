@@ -96,6 +96,58 @@ class FeedTests(unittest.TestCase):
 
 
 class RoundTests(unittest.IsolatedAsyncioTestCase):
+    @patch.dict(os.environ, LAB_LIVE="1", LAB_SPEED="0", LAB_SCHEDULE="0",
+                LAB_CHECK_URL="https://example.org/check", LAB_DOWNLOAD_URL="", LAB_UPLOAD_URL="",
+                LAB_IP_URL="https://example.org/ip", LAB_PAUSE_UTC="")
+    def test_ping_only_round_runs_without_speed_or_schedule(self):
+        from fastapi import APIRouter, HTTPException
+        from lab.cloudflare import DOWNLOAD, PING_REQUESTS
+        from lab.feeds import Plan, routes
+
+        with (tempfile.TemporaryDirectory() as tmp, patch("lab.feeds.require_link"),
+              patch("lab.feeds.download", return_value=URI + "#Fixture")):
+            store = Store(Path(tmp) / "db", Fernet.generate_key())
+            api = APIRouter()
+            routes(api, store)
+            endpoints = {route.endpoint.__name__: route.endpoint for route in api.routes}
+            saved = endpoints["save"](Plan(iface="lo", hours=12, url="https://example.org/fixture"))
+            fid = saved["id"]
+            with self.assertRaisesRegex(HTTPException, "subscription_speed_policy_disabled"):
+                endpoints["run_now"](fid)
+            self.assertTrue(endpoints["ping_now"](fid)["queued"])
+            self.assertFalse(endpoints["ping_now"](fid)["queued"])
+            refresh(store)
+            worker = Worker(store)
+
+            def run_job(attempts):
+                job = worker.claim()
+                self.assertEqual((job["kind"], job["reserved"]), ("ping", 0))
+                with (patch("lab.uplink.require_link"), patch("lab.worker.pinned", return_value=parse(URI)),
+                      patch("lab.uplink.tunnel", return_value=nullcontext(parse(URI))),
+                      patch("lab.worker.proxy", return_value=nullcontext("fixture-proxy")),
+                      patch("lab.worker.probe", side_effect=[{"ok": True}, *attempts]) as probe):
+                    worker.test(job)
+                self.assertEqual([call.args for call in probe.call_args_list],
+                                 [(DOWNLOAD + "0",)] + [(DOWNLOAD + "0", "fixture-proxy")] * PING_REQUESTS)
+
+            run_job([{"ok": True, "response_ms": latency} for latency in (30, 9, 20, 13)] + [Failure("timeout")])
+            endpoints["ping_now"](fid)
+            refresh(store)
+            run_job([Failure("timeout")] * PING_REQUESTS)
+
+            history = endpoints["rounds"]()["rounds"]
+            self.assertEqual([batch["ping_only"] for batch in history], [1, 1])
+            failed, passed = [batch["results"][0] for batch in history]
+            self.assertEqual((passed["ping_ms"], passed["ping_sample_ok"], passed["ping_sample_total"]), (16.5, 4, 5))
+            self.assertEqual((failed["ping_ms"], failed["ping_error"], failed["ping_sample_ok"]), (None, "timeout", 0))
+            for result in (failed, passed):
+                self.assertIsNone(result["mbps"])
+                self.assertIsNone(result["upload_mbps"])
+            self.assertEqual(store.rows("select enabled,due from feeds"), [{"enabled": 0, "due": saved["due"]}])
+            self.assertEqual(store.rows("select streak from configs"), [{"streak": 0}])
+            with patch.dict(os.environ, LAB_LIVE="0"), self.assertRaisesRegex(HTTPException, "subscription_ping_disabled"):
+                endpoints["ping_now"](fid)
+
     @patch.dict(os.environ, LAB_SPEED="1", LAB_LIVE="1", LAB_SCHEDULE="1",
                 LAB_DOWNLOAD_URL="https://example.org/download", LAB_UPLOAD_URL="https://example.org/upload",
                 LAB_CHECK_URL="https://example.org/check", LAB_DAY_CAP="0", LAB_CONFIG_CAP="0",

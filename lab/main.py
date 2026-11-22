@@ -96,6 +96,8 @@ def create():
     identity=json.loads((KEY/"identity.json").read_text())
     store=Store(DATA/"lab.sqlite",identity["key"].encode(),os.getenv("LAB_AGENT","local"))
     worker=Worker(store)
+    from .telegram_agent import Relay, routes as telegram_routes
+    relay=Relay(store)
     sessions={}
     attempts=collections.deque()
 
@@ -104,11 +106,14 @@ def create():
         with (DATA/"worker.lock").open("a") as lock:
             fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             thread=threading.Thread(target=worker.loop)
+            relay_thread=threading.Thread(target=relay.loop,args=(worker.stop,))
             thread.start()
+            relay_thread.start()
             try:
                 yield
             finally:
                 worker.stop.set()
+                relay_thread.join()
                 thread.join()
 
     app=FastAPI(title="Mobocloud Network Lab",lifespan=lifetime,openapi_url=None,docs_url=None,redoc_url=None)
@@ -332,6 +337,7 @@ def create():
 
     from .feeds import routes
     routes(api,store)
+    telegram_routes(api,relay)
     app.include_router(api)
     app.mount("/",StaticFiles(directory=ROOT/"frontend",html=True))
     return app

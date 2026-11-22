@@ -15,7 +15,7 @@ esac
 [ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] && [ "$(id -u)" = 0 ] || { echo 'Requires root on Debian 13'; exit 1; }
 if [ "$start" = 1 ]; then
     apt-get update
-    apt-get install -y ca-certificates curl python3-venv
+    apt-get install -y ca-certificates curl openssh-client python3-venv
 fi
 for cmd in python3 curl systemctl runuser useradd; do
     if ! command -v "$cmd" >/dev/null; then

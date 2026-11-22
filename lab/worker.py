@@ -67,16 +67,18 @@ class Worker:
         out=pinned(out,approved)
         kind=job["kind"]
         url=os.environ["LAB_CHECK_URL"]
-        if kind!="check" and not job.get("subscription_test") and job["created"]//86400!=int(time.time())//86400:
-            raise Failure("reservation_expired")
-        if kind!="check" and os.getenv("LAB_SPEED")!="1":
-            raise Failure("speed_disabled")
+        ping_only=kind=="ping"
+        speed=kind not in ("check","ping")
         subscription=job.get("subscription_test")
-        size=0 if kind=="check" else amount(kind)
+        if speed and not subscription and job["created"]//86400!=int(time.time())//86400:
+            raise Failure("reservation_expired")
+        if speed and os.getenv("LAB_SPEED")!="1":
+            raise Failure("speed_disabled")
+        size=amount(kind) if speed else 0
         if size and not subscription and speed_reservation(size)>job["reserved"]:
             raise Failure("budget_changed")
         upload_url=os.getenv("LAB_UPLOAD_URL")
-        cloudflare_test=subscription and batch and batch[0]["cloudflare_upload"]
+        cloudflare_test=ping_only or (subscription and batch and batch[0]["cloudflare_upload"])
         if cloudflare_test:
             url=cloudflare.DOWNLOAD+"0"
         from .baseline import interface_stats
@@ -91,7 +93,11 @@ class Worker:
         base["interface"]=interface_stats(iface)
         relay_options={"timeout":cloudflare.CONNECT_TIMEOUT} if cloudflare_test else {}
         with tunnel(out,iface,**relay_options) as bound, proxy(bound,os.getenv("LAB_XRAY","xray"),cancelled) as port:
-            if cloudflare_test:
+            if ping_only:
+                ping=cloudflare.ping_samples(measure,port,cancelled)
+                result=dict(ok=ping["ping_ms"] is not None,error=ping["ping_error"],
+                            total_ms=None,rx=0,tx=0,**ping)
+            elif cloudflare_test:
                 result=cloudflare.benchmark(measure,port,size,amount("upload"),cancelled)
             elif subscription:
                 target=os.environ["LAB_DOWNLOAD_URL"]
@@ -107,7 +113,7 @@ class Worker:
                 result=probe(target,port,kind,size,size if kind=="download" else 65536,cancelled=cancelled)
             method="cloudflare-v3:" if cloudflare_test else "curl-v1:"
             result["method"]=hashlib.sha256((method+url).encode()).hexdigest()[:16]
-            if result["ok"] and os.getenv("LAB_IP_URL"):
+            if result["ok"] and not ping_only and os.getenv("LAB_IP_URL"):
                 for target in filter(None,[os.getenv("LAB_IP_URL"),os.getenv("LAB_IP_FALLBACK_URL")]):
                     ip=measure(target,port,cap=128,body=True,cancelled=cancelled)
                     result["exit_ip"]=ip.get("exit_ip")
@@ -120,7 +126,7 @@ class Worker:
             db.execute("update jobs set state='done' where id=?",(job["id"],))
 
     def notify(self):
-        if os.getenv("LAB_TELEGRAM")!="1":
+        if os.getenv("LAB_TELEGRAM")!="1" or self.store.rows("select 1 from telegram_link where id=1"):
             return
         rows=self.store.rows("""select a.*,i.config,c.product from alerts a join incidents i on i.id=a.incident
              join configs c on c.id=i.config where a.state='pending' and a.due<=? order by a.id limit 1""",(time.time(),))

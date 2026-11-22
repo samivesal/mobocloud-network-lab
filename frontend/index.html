@@ -52,6 +52,30 @@
       <div id="rounds"></div>
       <button id="older" class="older" type="button" hidden>نمایش دورهای قدیمی‌تر</button>
     </section>
+    <section aria-labelledby="telegram-title">
+      <details id="telegram-panel">
+        <summary id="telegram-title">اتصال تلگرام</summary>
+        <form id="telegram-form" class="relay-form" autocomplete="off">
+          <p class="relay-wide muted">ربات روی سرور خارج نصب می‌شود. دستگاه ایران تست‌ها را اجرا می‌کند و نتیجه‌ها را از راه SSH می‌فرستد.</p>
+          <label>آی‌پی عمومی سرور خارج<input name="server" dir="ltr" required maxlength="45"></label>
+          <label>نام کاربری SSH<input name="username" dir="ltr" value="root" required maxlength="32"></label>
+          <label>پورت SSH<input name="ssh_port" type="number" dir="ltr" value="22" min="1" max="65535" required></label>
+          <label>پورت API محلی سرور خارج<input name="api_port" type="number" dir="ltr" value="8876" min="1024" max="65535" required></label>
+          <label class="relay-wide">اثر انگشت کلید سرور SSH
+            <input name="fingerprint" dir="ltr" placeholder="SHA256:…" required maxlength="50">
+            <span class="muted">روی سرور خارج اجرا کن: <bdi><code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code></bdi></span>
+          </label>
+          <label>رمز SSH<input name="password" type="password" dir="ltr" maxlength="512" autocomplete="new-password"></label>
+          <label>یا فایل کلید خصوصی SSH<input name="private_key" type="file"></label>
+          <label>توکن ربات تلگرام<input name="bot_token" type="password" dir="ltr" required maxlength="121" autocomplete="new-password"></label>
+          <label>شناسهٔ عددی چت خصوصی<input name="chat_id" inputmode="numeric" dir="ltr" pattern="[0-9]+" required maxlength="16"></label>
+          <div class="actions relay-wide">
+            <button class="primary" type="submit">نصب و اتصال ربات</button>
+            <p id="telegram-status" class="notice" role="status"></p>
+          </div>
+        </form>
+      </details>
+    </section>
     <dialog id="delete-feed-dialog" aria-labelledby="delete-feed-title">
       <form id="delete-feed-form">
         <h2 id="delete-feed-title">حذف اشتراک</h2>

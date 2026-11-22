@@ -54,6 +54,8 @@ class Store:
             setup_reports(db)
             from .feeds import setup as setup_feeds
             setup_feeds(db)
+            from .telegram_agent import setup as setup_telegram
+            setup_telegram(db)
 
     @contextlib.contextmanager
     def db(self, write=False):
@@ -88,7 +90,7 @@ class Store:
             raise ValueError("config_disabled_or_missing")
         reserved=0
         now=int(time.time())
-        if kind!="check":
+        if kind not in ("check","ping"):
             if os.getenv("LAB_SPEED")!="1" or not os.getenv("LAB_"+kind.upper()+"_URL"):
                 raise ValueError("speed_disabled")
             if not subscription_test:

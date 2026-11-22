@@ -13,11 +13,30 @@ const escape = value => String(value ?? "").replace(/[&<>"']/g, char =>
   ({"&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"})[char]);
 
 const errors = {
+  relay_invalid_server: "آی‌پی عمومی معتبر سرور خارج را وارد کن.",
+  relay_ssh_unreachable: "دستگاه ایران نتوانست به SSH سرور خارج برسد.",
+  relay_fingerprint_mismatch: "اثر انگشت SSH با کلید سرور هم‌خوانی ندارد.",
+  relay_ssh_credentials: "فقط یکی از رمز SSH یا فایل کلید را وارد کن.",
+  relay_invalid_token: "فرمت توکن ربات تلگرام معتبر نیست.",
+  relay_ssh_tools_unavailable: "ابزارهای SSH روی دستگاه ایران در دسترس نیستند.",
+  relay_setup_failed: "نصب ربات انجام نشد. دسترسی SSH مدیر، Python، systemd و چت خصوصی تلگرام را بررسی کن.",
+  relay_remote_permissions: "حساب سرور خارج باید root باشد یا بدون رمز به sudo دسترسی داشته باشد.",
+  relay_remote_directory_conflict: "یکی از مسیرهای نصب رله روی سرور خارج با فایل یا پوشهٔ موجود تداخل دارد.",
+  relay_remote_health: "سرویس ربات پاسخ نداد. آزاد بودن پورت API محلی را روی سرور خارج بررسی کن.",
+  relay_telegram_unavailable: "سرور خارج با تلگرام ارتباط نگرفت. دسترسی HTTPS و توکن ربات را بررسی کن.",
+  relay_telegram_webhook: "این ربات از قبل webhook دارد. برای رله از ربات جداگانه استفاده کن.",
+  relay_telegram_chat: "چت خصوصی پیدا نشد. به ربات /start بفرست و شناسهٔ عددی چت را بررسی کن.",
+  relay_transport_unavailable: "سرویس نصب شد، اما اتصال با حساب محدود رله برقرار نشد. دسترسی SSH حساب mobocloud-relay را بررسی کن.",
+  relay_credentials_invalid: "کلید ارتباط با سرور خارج خوانده نشد. رله را دوباره متصل کن.",
+  relay_unavailable: "ارتباط با رلهٔ تلگرام برقرار نشد.",
+  relay_response_invalid: "پاسخ رلهٔ تلگرام معتبر نیست.",
+  relay_setup_in_progress: "راه‌اندازی رله از قبل در جریان است.",
   invalid_length: "بدنهٔ درخواست معتبر نیست.",
   invalid_input: "اطلاعات واردشده را بررسی کنید.",
   invalid_url_or_inactive_interface: "لینک HTTPS و اتصال شبکه را بررسی کنید.",
   interface_unavailable: "رابط شبکه متصل نیست.",
   subscription_speed_policy_disabled: "سرویس تست اشتراک فعال نیست.",
+  subscription_ping_disabled: "برای تست پینگ، تست زنده را در تنظیمات فعال کن.",
   feed_refresh_failed: "دریافت اشتراک ناموفق بود.",
   connection_timeout: "مهلت اتصال تمام شد.",
   timeout: "مهلت این اندازه‌گیری تمام شد.",
@@ -123,8 +142,11 @@ function drawFeeds(data) {
   ).join("");
   paint(select, options || '<option value="">اتصال فعالی پیدا نشد</option>');
   if (selected && [...select.options].some(option => option.value === selected)) select.value = selected;
-  form.querySelector("button").disabled = !data.ready || !select.value;
-  document.querySelector("#policy-notice").hidden = data.ready;
+  form.querySelector("button").disabled = !data.ping_ready || !select.value;
+  const policyNotice = document.querySelector("#policy-notice");
+  policyNotice.hidden = data.ready;
+  policyNotice.classList.toggle("error", !data.ping_ready);
+  policyNotice.textContent = data.ping_ready ? "فقط تست پینگ فعال است." : errorText("subscription_ping_disabled");
 
   paint(document.querySelector("#feeds"), feeds.map(feed => {
     const batch = feed.progress;
@@ -139,6 +161,7 @@ function drawFeeds(data) {
       ${progress}
       <div class="actions" data-feed="${feed.id}">
         <button class="primary" data-action="run" ${feed.busy || !data.ready ? "disabled" : ""}>تست فوری Cloudflare</button>
+        <button data-action="ping" ${feed.busy || !data.ping_ready ? "disabled" : ""}>فقط پینگ</button>
         <button data-action="toggle" data-enabled="${feed.enabled ? 0 : 1}" ${!feed.enabled && !data.ready ? "disabled" : ""}>${feed.enabled ? "توقف" : "ادامه"}</button>
         <button data-action="delete" class="danger">حذف اشتراک</button>
         <select data-action="period" aria-label="دورهٔ اجرای ${escape(feed.name)}">
@@ -150,7 +173,7 @@ function drawFeeds(data) {
   }).join("") || '<p class="muted">هنوز اشتراکی ذخیره نشده است.</p>');
 }
 
-function resultRow(result) {
+function resultRow(result, pingOnly) {
   const pending = active(result);
   const status = pending
     ? ({queued:"در صف", running:"در حال تست", cancelling:"در حال توقف"})[result.state]
@@ -170,13 +193,13 @@ function resultRow(result) {
       ${tunnelResponded ? '<span class="badge success">پراکسی پاسخ داد</span>' : ""}
     </div>
     ${time(result.at)}
-    <div class="metrics">
+    <div class="metrics ${pingOnly ? "ping-only" : ""}">
       ${metric(result.ping_ms != null && !result.ping_method ? "زمان پاسخ کامل" : "پینگ", result.ping_ms, "ms",
         result.ping_error, result.ping_sample_ok, result.ping_sample_total, wholeNumber)}
-      ${metric("دانلود", result.mbps, "Mbps", result.state === "done" ? result.error : null,
+      ${pingOnly ? "" : `${metric("دانلود", result.mbps, "Mbps", result.state === "done" ? result.error : null,
         result.download_sample_ok, result.download_sample_total)}
       ${metric("آپلود", result.upload_mbps, "Mbps", result.upload_error,
-        result.upload_sample_ok, result.upload_sample_total, uploadSpeed)}
+        result.upload_sample_ok, result.upload_sample_total, uploadSpeed)}`}
     </div>
     ${pending || (!result.ok && result.state !== "done") ?
       `<span class="result-status ${pending ? "muted" : "error"}">${escape(status)}</span>` : ""}
@@ -197,12 +220,12 @@ function drawRounds() {
     if (batch.skipped) messages.push(`${number.format(batch.skipped)} کانفیگ وارد صف نشد`);
     if (batch.error) messages.push(errorText(batch.error));
     const expanded = open.get(batch.id) ?? index === 0;
-    const kind = ({manual:"اجرای فوری", scheduled:"دوره‌ای", legacy:"دور قبلی"})[batch.kind];
+    const kind = batch.ping_only ? "فقط پینگ" : ({manual:"اجرای فوری", scheduled:"دوره‌ای", legacy:"دور قبلی"})[batch.kind];
     return `<details data-round="${batch.id}" ${expanded ? "open" : ""}>
       <summary><bdi>${escape(batch.name)}</bdi> · ${kind} ${time(batch.created)}</summary>
       <div class="round-inner">
         ${messages.length ? `<p class="${batch.error ? "error" : "muted"}">${escape(messages.join(" · "))}</p>` : ""}
-        ${batch.results.map(resultRow).join("") || (!messages.length ? '<p class="muted">نتیجه‌ای ثبت نشده است.</p>' : "")}
+        ${batch.results.map(result => resultRow(result, batch.ping_only)).join("") || (!messages.length ? '<p class="muted">نتیجه‌ای ثبت نشده است.</p>' : "")}
       </div>
     </details>`;
   }).join("") || '<p class="muted">هنوز دور تستی ثبت نشده است.</p>');
@@ -314,9 +337,11 @@ function bindDashboard() {
       return;
     }
     act(async () => {
-      if (button.dataset.action === "run") {
-        const round = await api(path + "/run?cloudflare_upload=true", "POST", {});
-        notice(round.queued ? "یک دور تست در صف قرار گرفت." : "یک دور تست در صف یا در حال اجراست.");
+      if (["run", "ping"].includes(button.dataset.action)) {
+        const ping = button.dataset.action === "ping";
+        const round = await api(path + (ping ? "/ping" : "/run?cloudflare_upload=true"), "POST", {});
+        if (round.queued) notice(ping ? "تست پینگ در صف قرار گرفت." : "یک دور تست در صف قرار گرفت.");
+        else notice("یک دور تست در صف یا در حال اجراست.");
       } else {
         await api(path + "?enabled=" + (button.dataset.enabled === "1"), "PATCH", {});
       }
@@ -335,6 +360,57 @@ function bindDashboard() {
     drawRounds();
   });
   bindHistory();
+  bindTelegram();
+}
+
+function bindTelegram() {
+  const panel = document.querySelector("#telegram-panel");
+  const form = document.querySelector("#telegram-form");
+  const status = document.querySelector("#telegram-status");
+  const button = form.querySelector("[type=submit]");
+  const show = (message, error = false) => {
+    status.textContent = message;
+    status.classList.toggle("error", error);
+  };
+  function showStatus(data) {
+    if (data.error) show(errorText(data.error), true);
+    else if (data.last_ok) show("آخرین ارتباط موفق: " + date.format(data.last_ok * 1000));
+    else show("ربات هنوز متصل نشده است.");
+  }
+  panel.ontoggle = async () => {
+    if (!panel.open || button.disabled) return;
+    try {
+      showStatus(await api("telegram"));
+    } catch (error) {
+      show(errorText(error.message), true);
+    }
+  };
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (button.disabled) return;
+    button.disabled = true;
+    show("در حال اتصال به سرور خارج و نصب ربات…");
+    try {
+      const data = new FormData(form);
+      const file = form.elements.private_key.files[0];
+      if (file && file.size > 32768) throw new Error("relay_ssh_credentials");
+      await api("telegram/setup", "POST", {
+        server: data.get("server").trim(), username: data.get("username").trim(),
+        ssh_port: Number(data.get("ssh_port")), api_port: Number(data.get("api_port")),
+        fingerprint: data.get("fingerprint").trim(), password: data.get("password"),
+        private_key: file ? await file.text() : "", bot_token: data.get("bot_token").trim(),
+        chat_id: Number(data.get("chat_id"))
+      });
+      show("ربات متصل است. در تلگرام دستور /test را بفرست.");
+    } catch (error) {
+      show(errorText(error.message), true);
+    } finally {
+      form.elements.password.value = "";
+      form.elements.private_key.value = "";
+      form.elements.bot_token.value = "";
+      button.disabled = false;
+    }
+  };
 }
 
 function bindHistory() {

@@ -46,16 +46,20 @@ def transfer_samples(measure, port, kind, max_bytes, cancelled):
     return dict(result, sample_ok=sum(item["ok"] for item in attempts), sample_total=len(attempts))
 
 
-def benchmark(measure, port, download_bytes, upload_bytes, cancelled):
+def ping_samples(measure, port, cancelled):
     pings = [measure(DOWNLOAD + "0", port, cancelled=cancelled,
                      timeout=PING_TIMEOUT, connect_timeout=CONNECT_TIMEOUT)
              for _ in range(PING_REQUESTS)]
     latency = [item["response_ms"] for item in pings
                if item["ok"] and item.get("response_ms") is not None]
-    download = transfer_samples(measure, port, "download", download_bytes, cancelled)
-    upload = transfer_samples(measure, port, "upload", upload_bytes, cancelled)
-    return dict(download, ping_ms=median(latency) if latency else None,
+    return dict(ping_ms=median(latency) if latency else None,
                 ping_method="cloudflare_https_median",
                 ping_error=None if latency else (pings[-1].get("error") or "response"),
-                ping_sample_ok=len(latency), ping_sample_total=len(pings),
-                upload=upload)
+                ping_sample_ok=len(latency), ping_sample_total=len(pings))
+
+
+def benchmark(measure, port, download_bytes, upload_bytes, cancelled):
+    ping = ping_samples(measure, port, cancelled)
+    download = transfer_samples(measure, port, "download", download_bytes, cancelled)
+    upload = transfer_samples(measure, port, "upload", upload_bytes, cancelled)
+    return dict(download, **ping, upload=upload)

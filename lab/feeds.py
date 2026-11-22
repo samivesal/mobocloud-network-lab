@@ -1,4 +1,4 @@
-"""A saved feed is refreshed at the start of every download-test round."""
+"""A saved feed is refreshed at the start of every subscription test round."""
 import os
 import sqlite3
 import time
@@ -38,6 +38,8 @@ def setup(db):
     db.execute("begin immediate")
     if "cloudflare_upload" not in {column[1] for column in db.execute("pragma table_info(feed_rounds)")}:
         db.execute("alter table feed_rounds add column cloudflare_upload integer not null default 0")
+    if "ping_only" not in {column[1] for column in db.execute("pragma table_info(feed_rounds)")}:
+        db.execute("alter table feed_rounds add column ping_only integer not null default 0")
     if "subscription_test" not in {column[1] for column in db.execute("pragma table_info(jobs)")}:
         db.execute("alter table jobs add column subscription_test integer not null default 0")
         db.execute("update jobs set subscription_test=1 where id in(select job from feed_jobs)")
@@ -66,6 +68,10 @@ def ready():
     return all(os.getenv(k)=="1" for k in ("LAB_LIVE","LAB_SPEED","LAB_SCHEDULE")) and bool(os.getenv("LAB_DOWNLOAD_URL") and os.getenv("LAB_CHECK_URL"))
 
 
+def ping_ready():
+    return os.getenv("LAB_LIVE")=="1" and bool(os.getenv("LAB_CHECK_URL"))
+
+
 class Selection(BaseModel):
     iface:str=Field(min_length=1,max_length=15)
     hours:Literal[12,24]
@@ -83,6 +89,26 @@ class Period(BaseModel):
 def active_round(db,feed):
     return db.execute(f"select id from feed_rounds r where feed=? and ({ACTIVE_ROUND})",
                       (feed,)).fetchone()
+
+
+def queue_round(db, fid, cloudflare_upload=False, *, ping_only=False):
+    if not (ping_ready() if ping_only else ready()):
+        if ping_only:
+            raise HTTPException(409,"subscription_ping_disabled")
+        raise HTTPException(409,"subscription_speed_policy_disabled")
+    feed=db.execute("select iface from feeds where id=? and not deleted",(fid,)).fetchone()
+    if not feed:
+        raise HTTPException(404,"missing")
+    current=active_round(db,fid)
+    if current:
+        return {"id":current["id"],"queued":False}
+    try:
+        require_link(feed["iface"])
+    except Failure:
+        raise HTTPException(422,"interface_unavailable") from None
+    rid=db.execute("""insert into feed_rounds(feed,iface,created,kind,state,cloudflare_upload,ping_only)
+        values(?,?,?,'manual','pending',?,?)""",(fid,feed["iface"],time.time(),cloudflare_upload,ping_only)).lastrowid
+    return {"id":rid,"queued":True}
 
 
 def history_filter(fid):
@@ -106,7 +132,7 @@ def stop_rounds(db,fid):
 def routes(api,store):
     @api.get("/subscriptions")
     def list_feeds(summary:bool=False):
-        data = dict(interfaces=interfaces(),ready=ready(),bytes=amount("download"),
+        data = dict(interfaces=interfaces(),ready=ready(),ping_ready=ping_ready(),bytes=amount("download"),
             upload_ready=bool(os.getenv("LAB_UPLOAD_URL")),
             feeds=store.rows(f"""select id,name,iface,hours,enabled,due,seen,queued,rejected,skipped,error,
                 exists(select 1 from feed_rounds r where r.feed=feeds.id and ({ACTIVE_ROUND})) busy
@@ -133,7 +159,8 @@ def routes(api,store):
         with store.db() as db:
             db.execute("begin")
             batches = [dict(row, results=[]) for row in db.execute("""
-                select r.id,r.feed,r.iface,r.created,r.kind,r.state,r.seen,r.rejected,r.skipped,r.error,f.name from feed_rounds r join feeds f on f.id=r.feed
+                select r.id,r.feed,r.iface,r.created,r.kind,r.state,r.seen,r.rejected,r.skipped,r.error,r.ping_only,f.name
+                from feed_rounds r join feeds f on f.id=r.feed
                 where (? is null or r.id<?) order by r.id desc limit 11""",(before,before))]
             more = len(batches)>10
             batches = batches[:10]
@@ -192,35 +219,26 @@ def routes(api,store):
             require_link(plan.iface)
         except (ValueError,Failure):
             raise HTTPException(422,"invalid_url_or_inactive_interface") from None
-        if not ready():
-            raise HTTPException(409,"subscription_speed_policy_disabled")
+        if not ping_ready():
+            raise HTTPException(409,"subscription_ping_disabled")
         due=time.time()+3600*plan.hours
         with store.db(True) as db:
             id_=db.execute("""insert into feeds(name,url,iface,hours,enabled,due)
-                values(?,?,?,?,1,?)""",(plan.name.strip() or "اشتراک",store.cipher.encrypt(plan.url.encode()),
-                plan.iface,plan.hours,due)).lastrowid
+                values(?,?,?,?,?,?)""",(plan.name.strip() or "اشتراک",store.cipher.encrypt(plan.url.encode()),
+                plan.iface,plan.hours,ready(),due)).lastrowid
             if not plan.name.strip():
                 db.execute("update feeds set name=? where id=?",(f"اشتراک {id_}",id_))
         return {"id":id_,"due":due}
 
     @api.post("/subscriptions/{fid}/run")
     def run_now(fid:int,cloudflare_upload:bool=False):
-        if not ready():
-            raise HTTPException(409,"subscription_speed_policy_disabled")
         with store.db(True) as db:
-            feed=db.execute("select iface from feeds where id=? and not deleted",(fid,)).fetchone()
-            if not feed:
-                raise HTTPException(404,"missing")
-            current=active_round(db,fid)
-            if current:
-                return {"id":current["id"],"queued":False}
-            try:
-                require_link(feed["iface"])
-            except Failure:
-                raise HTTPException(422,"interface_unavailable") from None
-            rid=db.execute("""insert into feed_rounds(feed,iface,created,kind,state,cloudflare_upload)
-                values(?,?,?,'manual','pending',?)""",(fid,feed["iface"],time.time(),cloudflare_upload)).lastrowid
-        return {"id":rid,"queued":True}
+            return queue_round(db,fid,cloudflare_upload)
+
+    @api.post("/subscriptions/{fid}/ping")
+    def ping_now(fid:int):
+        with store.db(True) as db:
+            return queue_round(db,fid,ping_only=True)
 
     @api.delete("/subscriptions/{fid}")
     def delete_feed(fid:int):
@@ -294,15 +312,20 @@ def entries(body):
 
 def refresh(store):
     now=time.time()
-    if not ready() or maintenance(now):
+    speed_ready=ready()
+    if not ping_ready() or maintenance(now):
         return
     with store.db(True) as db:
-        request=db.execute("""select r.id round_id,r.iface,f.url from feed_rounds r
-            join feeds f on f.id=r.feed where r.state='pending' order by r.id limit 1""").fetchone()
+        request=db.execute("""select r.id round_id,r.iface,f.url,r.ping_only from feed_rounds r
+            join feeds f on f.id=r.feed where r.state='pending' and (r.ping_only or ?)
+            order by r.id limit 1""",(speed_ready,)).fetchone()
         if request:
-            rid,iface,url=request
+            rid,iface,url,ping_only=request
             db.execute("update feed_rounds set state='loading' where id=?",(rid,))
         else:
+            if not speed_ready:
+                return
+            ping_only=False
             feed=db.execute(f"""select * from feeds f where not deleted and enabled and due<=? and not exists(
                 select 1 from feed_rounds r where r.feed=f.id and ({ACTIVE_ROUND}))
                 order by due,id limit 1""",(now,)).fetchone()
@@ -338,7 +361,7 @@ def refresh(store):
                 continue
             ids.add(cid)
             try:
-                jid=store.enqueue(db,cid,"download",subscription_test=True)
+                jid=store.enqueue(db,cid,"ping" if ping_only else "download",subscription_test=True)
             except (ValueError,sqlite3.IntegrityError) as exc:
                 skipped+=1
                 code=str(exc) if isinstance(exc,ValueError) else "job_pending"

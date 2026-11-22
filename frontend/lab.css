@@ -53,6 +53,8 @@ main section + section { margin-top: 32px; }
 .panel, details, dialog { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow); }
 .panel, dialog { padding: 22px; }
 .feed-form { display: grid; grid-template-columns: minmax(0,2fr) repeat(2,minmax(0,1fr)) auto auto; gap: 12px; align-items: end; }
+.relay-form { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 0 20px 20px; }
+.relay-wide { grid-column: 1 / -1; overflow-wrap: anywhere; }
 label { display: grid; gap: 5px; font-size: .88rem; min-width: 0; }
 button, input, select { font: inherit; color: inherit; min-height: 44px; border: 1px solid var(--border); border-radius: 12px; background: var(--input); padding: 7px 12px; }
 input, select { width: 100%; min-width: 0; }
@@ -99,6 +101,7 @@ summary time { margin-inline-start: 10px; font-size: .85rem; }
 .result time, .result-status { font-size: .85rem; }
 .result-status { grid-column: 1 / -1; }
 .metrics { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; }
+.metrics.ping-only { grid-template-columns: minmax(0,1fr); }
 .metric { display: grid; align-content: start; min-width: 0; padding: 8px 10px; border-radius: 11px; background: var(--input); font-size: .85rem; }
 .metric-error, .metric-samples { font-size: .75rem; }
 .speed { justify-self: start; color: var(--blue); font-variant-numeric: tabular-nums; }
@@ -119,6 +122,7 @@ dialog p { margin-block: 14px; }
   .panel { padding: 16px; }
   .feed-grid { grid-template-columns: minmax(0,1fr); }
   .feed-form { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .relay-form { grid-template-columns: minmax(0,1fr); }
   .url-field { grid-column: 1 / -1; }
   .feed-form .choice { grid-column: 1 / -1; }
   .feed-form .choice label { flex: 1; }
