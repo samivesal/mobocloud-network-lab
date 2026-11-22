@@ -1,8 +1,18 @@
 #!/bin/sh
 set -eu
+export LC_ALL=C.UTF-8
 
 service=mobohub-lab.service
 settings=/etc/mobohub-network-lab/settings
+release=/opt/mobohub-lab/current
+
+manage() {
+    if [ "$(id -u)" -ne 0 ]; then
+        printf '%s\n' 'Run sudo mobocloud to use this option.' >&2
+        return 1
+    fi
+    (cd "$release" && LAB_KEY_DIR=/etc/mobohub-network-lab/keys .venv/bin/python "$@")
+}
 
 address() {
     port=
@@ -23,10 +33,19 @@ action() {
         logs) journalctl --no-pager -u "$service" -n 60 ;;
         restart) systemctl restart "$service" ;;
         settings)
-            "${EDITOR:-editor}" "$settings" || return "$?"
-            printf '%s\n' 'برای اعمال تنظیمات، سرویس را راه‌اندازی مجدد کنید.'
+            if manage -m lab.manage "$settings"; then
+                systemctl restart "$service"
+            else
+                status=$?
+                [ "$status" -eq 3 ] || return "$status"
+            fi
             ;;
-        *) printf '%s\n' 'Usage: mobocloud [status|address|health|logs|restart|settings]' >&2; return 2 ;;
+        reset-password)
+            manage -m lab.main reset-password || return "$?"
+            systemctl restart "$service" || return "$?"
+            printf '%s\n' 'Administrator password changed. Sign in with the new password.'
+            ;;
+        *) printf '%s\n' 'Usage: mobocloud [status|address|health|logs|restart|settings|reset-password]' >&2; return 2 ;;
     esac
 }
 
@@ -37,15 +56,16 @@ fi
 
 while :; do
     printf '\nMobocloud Network Lab · %s\n' "$(address)"
-    printf '%s\n' '۱) وضعیت سرویس' '۲) گزارش سرویس' '۳) راه‌اندازی مجدد' '۴) ویرایش تنظیمات' '۰) خروج'
-    printf '%s' 'انتخاب: '
+    printf '%s\n' '1) Service status' '2) Service logs' '3) Restart service' '4) Settings' '5) Reset administrator password' '0) Exit'
+    printf '%s' 'Select: '
     IFS= read -r choice || break
     case "$choice" in
-        1|۱) action status || : ;;
-        2|۲) action logs || : ;;
-        3|۳) action restart || : ;;
-        4|۴) action settings || : ;;
-        0|۰) break ;;
-        *) printf '%s\n' 'یکی از گزینه‌های منو را وارد کنید.' ;;
+        1) action status || : ;;
+        2) action logs || : ;;
+        3) action restart || : ;;
+        4) action settings || : ;;
+        5) action reset-password || : ;;
+        0) break ;;
+        *) printf '%s\n' 'Enter a menu option.' ;;
     esac
 done

@@ -37,8 +37,9 @@ def configure(db,cid,kind,interval):
       set interval=excluded.interval,due=excluded.due""",(cid,kind,interval,time.time()+interval))
 
 
-def maintenance(now):
-    window=os.getenv("LAB_PAUSE_UTC","")
+def maintenance(now, *, window=None):
+    if window is None:
+        window=os.getenv("LAB_PAUSE_UTC","")
     if not window:
         return False
     from datetime import datetime,timezone

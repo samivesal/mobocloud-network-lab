@@ -39,15 +39,33 @@ def digest(password,salt):
     return hashlib.scrypt(password.encode(),salt=salt,n=16384,r=8,p=1)
 
 
+def password_fields(confirm=False):
+    password=getpass.getpass("New administrator password: ")
+    if not password.strip() or len(password)>512:
+        raise SystemExit("Enter a non-empty administrator password of up to 512 characters.")
+    if confirm and password!=getpass.getpass("Repeat the new password: "):
+        raise SystemExit("The passwords do not match.")
+    salt=secrets.token_bytes(16)
+    return {"salt":salt.hex(),"password":digest(password,salt).hex()}
+
+
 def initialize():
     os.umask(0o077)
     KEY.mkdir(parents=True,exist_ok=True,mode=0o700)
-    password=getpass.getpass("New administrator password (12+ characters): ")
-    if len(password)<12:
-        raise SystemExit("Use at least 12 characters")
-    salt=secrets.token_bytes(16)
+    fields=password_fields()
     with (KEY/"identity.json").open("x") as f:
-        json.dump(dict(salt=salt.hex(),password=digest(password,salt).hex(),key=Fernet.generate_key().decode()),f)
+        json.dump(dict(fields,key=Fernet.generate_key().decode()),f)
+
+
+def reset_password():
+    from .manage import replace_text
+    os.umask(0o077)
+    path=KEY/"identity.json"
+    original=path.read_text()
+    identity=json.loads(original)
+    Fernet(identity["key"].encode())
+    identity.update(password_fields(confirm=True))
+    replace_text(path,json.dumps(identity),expected=original)
 
 
 class Import(BaseModel):
@@ -321,9 +339,15 @@ def create():
 
 if __name__=="__main__":
     parser=argparse.ArgumentParser()
-    parser.add_argument("command",choices=["init","serve"])
-    if parser.parse_args().command=="init":
-        initialize()
+    parser.add_argument("command",choices=["init","reset-password","serve"])
+    command=parser.parse_args().command
+    if command in ("init","reset-password"):
+        try:
+            (initialize if command=="init" else reset_password)()
+        except (EOFError,KeyboardInterrupt):
+            raise SystemExit("Cancelled.") from None
+        except (OSError,ValueError,KeyError) as exc:
+            raise SystemExit(f"Could not update administrator identity: {exc}") from None
     else:
         import uvicorn
         uvicorn.run(create(),host="127.0.0.1",port=int(os.getenv("LAB_PORT","8765")),access_log=False)

@@ -3,6 +3,7 @@ set -eu
 umask 077
 PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin
 export PATH
+export LC_ALL=C.UTF-8
 start=0
 case "${1-}" in
     --start) start=1; shift ;;
@@ -22,7 +23,7 @@ for cmd in python3 curl systemctl runuser useradd; do
         exit 1
     fi
 done
-printf '%s\n' 'آماده‌سازی نسخهٔ Mobocloud…'
+printf '%s\n' 'Preparing the Mobocloud release...'
 src=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 base=/opt/mobohub-lab
 conf=/etc/mobohub-network-lab
@@ -55,7 +56,7 @@ if [ ! -f "$conf/settings" ]; then
         -e 's|^LAB_UPLOAD_URL=$|LAB_UPLOAD_URL=https://speed.cloudflare.com/__up|' \
         "$src/.env.example" > "$dest/settings.new"
     if [ "$start" = 1 ] && [ "$engine_ready" = 1 ] && [ -t 0 ]; then
-        printf '%s' 'تست زندهٔ اشتراک‌ها با Cloudflare فعال شود؟ [y/N] '
+        printf '%s' 'Enable live subscription testing with Cloudflare? [y/N] '
         IFS= read -r choice || choice=
         case "$choice" in
             y|Y|yes|YES) sed -i -E 's/^(LAB_LIVE|LAB_SPEED|LAB_SCHEDULE)=0$/\1=1/' "$dest/settings.new" ;;
@@ -80,7 +81,7 @@ if [ "$start" = 1 ]; then
     systemctl restart mobohub-lab.service
     for retry in 1 2 3 4 5 6 7 8 9 10; do
         if systemctl is-active --quiet mobohub-lab.service && /usr/local/bin/mobocloud health 2>/dev/null; then
-            printf 'پنل وب: %s\nمدیریت ترمینالی: sudo mobocloud\n' "$(/usr/local/bin/mobocloud address)"
+            printf 'Web panel: %s\nTerminal menu: sudo mobocloud\n' "$(/usr/local/bin/mobocloud address)"
             exit 0
         fi
         sleep 1

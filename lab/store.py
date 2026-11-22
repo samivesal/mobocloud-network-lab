@@ -131,8 +131,9 @@ class Store:
         db.execute("update configs set streak=?,health=? where id=?",(streak,health,cid))
 
 
-def amount(kind):
-    size=int(os.getenv("LAB_"+kind.upper()+"_BYTES","1000000" if kind=="upload" else "5000000"))
+def amount(kind,environ=None):
+    env=os.environ if environ is None else environ
+    size=int(env.get("LAB_"+kind.upper()+"_BYTES","1000000" if kind=="upload" else "5000000"))
     if not 1<=size<=MAX_PAYLOAD_BYTES:
         raise ValueError("invalid_size")
     return size
