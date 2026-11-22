@@ -18,7 +18,8 @@ from urllib.request import Request, build_opener, HTTPRedirectHandler, ProxyHand
 MAX_REQUEST = 131072
 SCHEMA = """
 create table if not exists state(key text primary key, value text not null);
-create table if not exists commands(id integer primary key, feed integer not null, answered integer not null default 0);
+create table if not exists commands(id integer primary key, feed integer not null, answered integer not null default 0,
+  operation text not null default 'speed', hours integer);
 create table if not exists outgoing(id text primary key, text text not null, markup text,
   attempts integer not null default 0, due real not null default 0, sent integer not null default 0);
 """
@@ -67,6 +68,15 @@ def get_state(db, key, default):
     return json.loads(row["value"]) if row else default
 
 
+def initialize(db):
+    db.executescript(SCHEMA)
+    columns = {row[1] for row in db.execute("pragma table_info(commands)")}
+    if "operation" not in columns:
+        db.execute("alter table commands add column operation text not null default 'speed'")
+    if "hours" not in columns:
+        db.execute("alter table commands add column hours integer")
+
+
 def enqueue_message(db, key, text, markup=None):
     db.execute("insert or ignore into outgoing(id,text,markup) values(?,?,?)",
                (key, text[:3500], json.dumps(markup) if markup else None))
@@ -76,6 +86,8 @@ def synchronize(db, payload):
     db.execute("begin immediate")
     set_state(db, "feeds", payload["feeds"])
     set_state(db, "agent_seen", int(time.time()))
+    scheduling = payload.get("schedule_version") == 1
+    set_state(db, "scheduling", scheduling)
     accepted = []
     for report in payload["reports"]:
         key = report["id"]
@@ -87,8 +99,40 @@ def synchronize(db, payload):
         if db.execute("update commands set answered=1 where id=? and answered=0", (command,)).rowcount:
             enqueue_message(db, f"ack:{command}", ack["text"])
         acknowledged.append(command)
-    pending = db.execute("select id,feed from commands where answered=0 order by id limit 25")
+    pending = db.execute("""select id,feed,operation,hours from commands
+        where answered=0 and (operation='speed' or ?) order by id limit 25""", (scheduling,))
     return {"accepted": accepted, "acknowledged": acknowledged, "commands": [dict(row) for row in pending]}
+
+
+def schedule_label(hours):
+    return f"Every {hours} h" if hours else "Off"
+
+
+def button(text, action):
+    return {"text": text, "callback_data": action}
+
+
+def subscriptions_menu(feeds, action):
+    return [[button(f"#{feed['id']} {feed['name'][:42]}", f"{action}:{feed['id']}")] for feed in feeds[:20]]
+
+
+def scheduling_menu(feed):
+    fid = feed["id"]
+    return [[button(f"Ping · {schedule_label(feed.get('ping_hours', 0))}", f"period:ping:{fid}")],
+            [button(f"Speed · {schedule_label(feed.get('speed_hours', 0))}", f"period:speed:{fid}")],
+            [button("Back to subscriptions", "schedule")]]
+
+
+def period_menu(mode, fid):
+    options = [button(f"{hours} h", f"set:{mode}:{fid}:{hours}") for hours in (1, 2, 4, 6, 12, 24)]
+    return [options[:3], options[3:], [button("Off", f"set:{mode}:{fid}:0"), button("Back", f"schedule:{fid}")]]
+
+
+def period_command(text):
+    callback = re.fullmatch(r"set:(ping|speed):([0-9]{1,12}):([0-9]{1,3})", text)
+    typed = re.fullmatch(r"/(ping|speed)_every ([0-9]{1,12}) ([0-9]{1,3})", text)
+    match = callback or typed
+    return match.groups() if match else None
 
 
 def apply_update(db, update, chat):
@@ -108,21 +152,51 @@ def apply_update(db, update, chat):
         return None
     text = callback.get("data", "") if callback else message.get("text", "")
     feeds = get_state(db, "feeds", [])
-    if text in ("/start", "/test", "/subscriptions"):
-        buttons = [[{"text": feed["name"][:48], "callback_data": f"test:{feed['id']}"}] for feed in feeds[:20]]
-        enqueue_message(db, f"update:{update_id}", "Choose a subscription to run a speed test."
-                        if buttons else "No subscriptions have synchronized from Mobocloud yet.",
-                        {"inline_keyboard": buttons} if buttons else None)
+    scheduling = get_state(db, "scheduling", False)
+
+    def send(message, buttons=None):
+        enqueue_message(db, f"update:{update_id}", message, {"inline_keyboard": buttons} if buttons else None)
+
+    if text == "/start" and scheduling:
+        send("Choose an action.", [[button("Speed test", "test"), button("Ping", "ping")],
+                                  [button("Schedules", "schedule")]])
+    elif text in ("/start", "/subscriptions", "/test", "test", "/ping", "ping", "/schedule", "schedule"):
+        action = text.strip("/")
+        action = action if action in ("ping", "schedule") else "test"
+        if action != "test" and not scheduling:
+            send("Update the Mobocloud panel and reconnect this relay to use ping and schedules.")
+        else:
+            buttons = subscriptions_menu(feeds, action)
+            send("Choose a subscription." if buttons else "No subscriptions have synchronized from Mobocloud yet.", buttons)
     elif text == "/status":
         active = time.time() - get_state(db, "agent_seen", 0) < 90
-        enqueue_message(db, f"update:{update_id}", "Mobocloud in Iran is connected." if active
-                        else "The last connection from Mobocloud in Iran is older than 90 seconds.")
+        send("Mobocloud in Iran is connected." if active
+             else "The last connection from Mobocloud in Iran is older than 90 seconds.")
     else:
-        match = re.fullmatch(r"(?:test:|/test )([0-9]{1,12})", text)
-        if match and any(feed["id"] == int(match[1]) for feed in feeds):
-            db.execute("insert or ignore into commands(id,feed) values(?,?)", (update_id, int(match[1])))
-        elif match:
-            enqueue_message(db, f"update:{update_id}", "Subscription unavailable. Open /test to refresh the list.")
+        menu = re.fullmatch(r"(?:schedule:|period:(ping|speed):)([0-9]{1,12})", text)
+        run = re.fullmatch(r"/?(test|ping)(?::| )([0-9]{1,12})", text)
+        set_period = period_command(text)
+        if menu or run or set_period:
+            mode, id_text = set_period[:2] if set_period else (menu or run).groups()
+            feed = next((feed for feed in feeds if feed["id"] == int(id_text)), None)
+            if not scheduling and (not run or mode != "test"):
+                send("Update the Mobocloud panel and reconnect this relay to use ping and schedules.")
+            elif not feed:
+                send("Subscription unavailable. Open /test or /schedule to refresh the list.")
+            elif menu:
+                if mode:
+                    send(f"Set {mode} interval. Use /{mode}_every {feed['id']} HOURS for any whole number from 1 to 168. Use 0 to turn it off.",
+                         period_menu(mode, feed["id"]))
+                else:
+                    send(f"Schedules for #{feed['id']} {feed['name']}", scheduling_menu(feed))
+            else:
+                hours = int(set_period[2]) if set_period else None
+                if hours is not None and hours > 168:
+                    send("Choose 1 to 168 hours, or 0 to turn off the schedule.")
+                else:
+                    operation = f"{mode}_schedule" if set_period else ("speed" if mode == "test" else "ping")
+                    db.execute("insert or ignore into commands(id,feed,operation,hours) values(?,?,?,?)",
+                               (update_id,feed["id"],operation,hours))
     return callback["id"] if callback else None
 
 
@@ -161,7 +235,7 @@ def bot_loop(path, config):
 def serve(config):
     path = Path(os.environ["STATE_DIRECTORY"]) / (config["link_id"] + ".sqlite")
     with database(path) as db:
-        db.executescript(SCHEMA)
+        initialize(db)
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):

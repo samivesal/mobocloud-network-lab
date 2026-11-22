@@ -17,7 +17,7 @@ from lab.feeds import refresh
 from lab.store import Store
 from lab import telegram_remote
 from lab.telegram_agent import HostTarget, Relay, RelayError, Setup, pinned_host, provision
-from lab.telegram_bridge import SCHEMA, apply_update, database, synchronize
+from lab.telegram_bridge import SCHEMA, apply_update, database, initialize, synchronize
 from tests.test_lab import URI
 
 
@@ -26,7 +26,120 @@ def update(number, chat, text):
                                              "from": {"id": chat}, "text": text}}
 
 
+def callback(number, chat, text):
+    return {"update_id": number, "callback_query": {"id": str(number), "data": text, "from": {"id": chat},
+            "message": {"chat": {"id": chat, "type": "private"}}}}
+
+
 class TelegramRelayTests(unittest.TestCase):
+    @patch.dict(os.environ, LAB_LIVE="1", LAB_SPEED="1", LAB_SCHEDULE="1", LAB_PAUSE_UTC="",
+                LAB_CHECK_URL="https://example.org/check", LAB_DOWNLOAD_URL="https://example.org/down")
+    def test_bot_sets_independent_schedules_and_reports_results(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "local.sqlite", Fernet.generate_key())
+            bridge = root / "bridge.sqlite"
+            with database(bridge) as db:
+                initialize(db)
+            with store.db(True) as db:
+                db.execute("insert into feeds(name,url,iface,hours,enabled,due) values(?,?,'lo',12,0,0)",
+                           ("Fixture", store.cipher.encrypt(b"fixture")))
+                db.execute("insert into telegram_link(id,secret) values(1,?)",
+                           (store.cipher.encrypt(b'{"link_id":"fixture","since":0}'),))
+
+            def exchange(_, payload):
+                with database(bridge) as db:
+                    return synchronize(db, payload)
+
+            relay = Relay(store)
+            now = int(time.time())
+            with (patch("lab.telegram_agent.exchange", side_effect=exchange), patch("lab.feeds.require_link"),
+                  patch("lab.feeds.download", return_value=URI), patch("lab.feeds.time.time", return_value=now) as clock):
+                relay.poll()
+                with database(bridge) as db:
+                    apply_update(db, update(1, 42, "/schedule"), 42)
+                with database(bridge) as db:
+                    shown = db.execute("select markup from outgoing where id='update:1'").fetchone()["markup"]
+                    self.assertIn("schedule:1", shown)
+                    apply_update(db, callback(2, 42, "period:ping:1"), 42)
+                with database(bridge) as db:
+                    shown = db.execute("select markup from outgoing where id='update:2'").fetchone()["markup"]
+                    self.assertIn("set:ping:1:1", shown)
+                    apply_update(db, callback(3, 43, "set:ping:1:1"), 42)
+                relay.poll()
+                self.assertEqual(store.rows("select ping_hours from feeds"), [{"ping_hours": 0}])
+                with database(bridge) as db:
+                    apply_update(db, callback(4, 42, "set:ping:1:1"), 42)
+                with database(bridge) as db:
+                    apply_update(db, update(5, 42, "/speed_every 1 3"), 42)
+                relay.poll()
+                clock.return_value = now + 20
+                relay.poll()
+                periods = store.rows("select ping_hours,ping_due,hours,due,enabled from feeds")[0]
+                self.assertEqual(periods, dict(ping_hours=1, ping_due=now+3600, hours=3, due=now+10800, enabled=1))
+                refresh(store)
+                self.assertEqual(store.rows("select id from feed_rounds"), [])
+
+                clock.return_value = now + 3600
+                refresh(store)
+                refresh(store)
+                self.assertEqual(store.rows("select kind,ping_only from feed_rounds"), [{"kind":"scheduled", "ping_only":1}])
+                with store.db(True) as db:
+                    job = db.execute("select * from jobs").fetchone()
+                    self.assertEqual(job["kind"], "ping")
+                    store.record(db, job, {"ok":True}, {"ok":True,"ping_ms":39.7})
+                    db.execute("update jobs set state='done'")
+                relay.poll()
+                relay.poll()
+                with database(bridge) as db:
+                    reports = db.execute("select text from outgoing where id like 'round:%'").fetchall()
+                    self.assertEqual(len(reports), 1)
+                    self.assertIn("Ping: 40 ms", reports[0]["text"])
+                    self.assertNotRegex(reports[0]["text"], "Download|Upload")
+                    apply_update(db, update(6, 42, "/ping_every 1 0"), 42)
+                relay.poll()
+                self.assertEqual(store.rows("select ping_hours,due from feeds"), [{"ping_hours":0,"due":now+10800}])
+
+                clock.return_value = now + 10800
+                refresh(store)
+                self.assertEqual(store.rows("select kind from jobs order by id"), [{"kind":"ping"}, {"kind":"download"}])
+                with store.db(True) as db:
+                    job = db.execute("select * from jobs where kind='download'").fetchone()
+                    store.record(db, job, {"ok":True}, {"ok":True,"ping_ms":30,"mbps":12,"upload":{"ok":True,"mbps":6}})
+                    db.execute("update jobs set state='done'")
+                relay.poll()
+                with database(bridge) as db:
+                    report = db.execute("select text from outgoing where id='round:2'").fetchone()["text"]
+                    self.assertIn("Download: 12.0 Mbps", report)
+                    self.assertIn("Upload: 6.0 Mbps", report)
+
+    def test_legacy_bridge_commands_migrate_without_becoming_schedule_requests(self):
+        with tempfile.TemporaryDirectory() as tmp, database(Path(tmp) / "bridge.sqlite") as db:
+            db.executescript("""create table commands(id integer primary key, feed integer not null,
+                answered integer not null default 0); insert into commands(id,feed) values(1,9);""")
+            initialize(db)
+            db.execute("insert into commands(id,feed,operation,hours) values(2,9,'ping_schedule',1)")
+            db.commit()
+            synced = synchronize(db, dict(feeds=[], reports=[], acks=[]))
+            self.assertEqual(synced["commands"], [dict(id=1, feed=9, operation="speed", hours=None)])
+
+    @patch.dict(os.environ, LAB_LIVE="1", LAB_SPEED="0", LAB_SCHEDULE="0",
+                LAB_CHECK_URL="https://example.org/check", LAB_DOWNLOAD_URL="")
+    def test_ping_schedule_obeys_the_global_schedule_flag_but_needs_no_speed_test(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(Path(tmp) / "local.sqlite", Fernet.generate_key())
+            with store.db(True) as db:
+                db.execute("insert into feeds(name,url,iface,hours,enabled,due) values('Fixture',?,'lo',12,0,0)",
+                           (store.cipher.encrypt(b"fixture"),))
+                request = dict(id=1, feed=1, operation="ping_schedule", hours=1)
+                Relay.queue(db, "fixture", request)
+                self.assertIn("Enable live testing", db.execute("select reply from telegram_commands").fetchone()["reply"])
+                with patch.dict(os.environ, LAB_SCHEDULE="1"):
+                    Relay.queue(db, "fixture", dict(request, id=2, hours=169))
+                    self.assertEqual(db.execute("select ping_hours from feeds").fetchone()["ping_hours"], 0)
+                    Relay.queue(db, "fixture", dict(request, id=3))
+                    self.assertEqual(db.execute("select ping_hours,enabled from feeds").fetchone()[:], (1, 0))
+
     def test_ssh_fingerprint_pins_only_matching_key(self):
         key = b"fixture-key"
         encoded = base64.b64encode(key).decode()

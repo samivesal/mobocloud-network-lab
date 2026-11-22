@@ -15,6 +15,7 @@ from .runner import Failure
 
 
 ACTIVE_JOBS = "('queued','running','cancelling')"
+MAX_PERIOD_HOURS = 168
 ACTIVE_ROUND = f"""r.state in ('pending','loading') or exists(
     select 1 from feed_jobs f join jobs j on j.id=f.job
     where f.round=r.id and j.state in {ACTIVE_JOBS})"""
@@ -46,6 +47,10 @@ def setup(db):
     feed_columns = {column[1] for column in db.execute("pragma table_info(feeds)")}
     if "deleted" not in feed_columns:
         db.execute("alter table feeds add column deleted integer not null default 0")
+    if "ping_hours" not in feed_columns:
+        db.execute("alter table feeds add column ping_hours integer not null default 0")
+    if "ping_due" not in feed_columns:
+        db.execute("alter table feeds add column ping_due real not null default 0")
     if "round" not in {column[1] for column in db.execute("pragma table_info(feed_jobs)")}:
         db.execute("alter table feed_jobs add column round integer references feed_rounds(id)")
     db.execute("create index if not exists feed_jobs_round on feed_jobs(round)")
@@ -72,6 +77,10 @@ def ping_ready():
     return os.getenv("LAB_LIVE")=="1" and bool(os.getenv("LAB_CHECK_URL"))
 
 
+def ping_schedule_ready():
+    return ping_ready() and os.getenv("LAB_SCHEDULE")=="1"
+
+
 class Selection(BaseModel):
     iface:str=Field(min_length=1,max_length=15)
     hours:Literal[12,24]
@@ -83,7 +92,7 @@ class Plan(Selection):
 
 
 class Period(BaseModel):
-    hours:Literal[12,24]
+    hours:int=Field(ge=1,le=MAX_PERIOD_HOURS)
 
 
 def active_round(db,feed):
@@ -111,6 +120,22 @@ def queue_round(db, fid, cloudflare_upload=False, *, ping_only=False):
     return {"id":rid,"queued":True}
 
 
+def set_relay_schedule(db, fid, *, ping_only, hours):
+    if hours and not (ping_schedule_ready() if ping_only else ready()):
+        code = "subscription_ping_schedule_disabled" if ping_only else "subscription_speed_policy_disabled"
+        raise HTTPException(409, code)
+    feed = db.execute("select enabled,hours,ping_hours from feeds where id=? and not deleted", (fid,)).fetchone()
+    if not feed:
+        raise HTTPException(404,"missing")
+    due = time.time() + 3600 * hours if hours else 0
+    if ping_only and feed["ping_hours"] != hours:
+        db.execute("update feeds set ping_hours=?,ping_due=? where id=?", (hours,due,fid))
+    elif not ping_only and hours and (not feed["enabled"] or feed["hours"] != hours):
+        db.execute("update feeds set enabled=1,hours=?,due=? where id=?", (hours,due,fid))
+    elif not ping_only and not hours:
+        db.execute("update feeds set enabled=0 where id=?", (fid,))
+
+
 def history_filter(fid):
     return (f"not ({ACTIVE_ROUND}) and (? is null or r.feed=?)", (fid,fid))
 
@@ -122,11 +147,12 @@ def history_count(db,where,args):
         from feed_rounds r where {where}""",args).fetchone()[0]
 
 
-def stop_rounds(db,fid):
+def stop_rounds(db,fid,*,speed_only=False):
     db.execute("""update feed_rounds set state='ready',error='cancelled'
-        where feed=? and state in ('pending','loading')""",(fid,))
+        where feed=? and state in ('pending','loading') and (not ? or not ping_only)""",(fid,speed_only))
     db.execute("""update jobs set state=case when state='queued' then 'cancelled' else 'cancelling' end
-        where state in ('queued','running') and id in(select job from feed_jobs where feed=?)""",(fid,))
+        where state in ('queued','running') and (not ? or kind!='ping')
+        and id in(select job from feed_jobs where feed=?)""",(speed_only,fid))
 
 
 def routes(api,store):
@@ -134,7 +160,7 @@ def routes(api,store):
     def list_feeds(summary:bool=False):
         data = dict(interfaces=interfaces(),ready=ready(),ping_ready=ping_ready(),bytes=amount("download"),
             upload_ready=bool(os.getenv("LAB_UPLOAD_URL")),
-            feeds=store.rows(f"""select id,name,iface,hours,enabled,due,seen,queued,rejected,skipped,error,
+            feeds=store.rows(f"""select id,name,iface,hours,enabled,due,ping_hours,ping_due,seen,queued,rejected,skipped,error,
                 exists(select 1 from feed_rounds r where r.feed=feeds.id and ({ACTIVE_ROUND})) busy
                 from feeds where not deleted order by id desc"""))
         if summary:
@@ -243,7 +269,7 @@ def routes(api,store):
     @api.delete("/subscriptions/{fid}")
     def delete_feed(fid:int):
         with store.db(True) as db:
-            if not db.execute("update feeds set deleted=1,enabled=0,url=x'' where id=?",(fid,)).rowcount:
+            if not db.execute("update feeds set deleted=1,enabled=0,ping_hours=0,ping_due=0,url=x'' where id=?",(fid,)).rowcount:
                 raise HTTPException(404,"missing")
             stop_rounds(db,fid)
         return {"ok":True}
@@ -286,7 +312,7 @@ def routes(api,store):
                            (time.time()+3600*current["hours"],fid))
             else:
                 db.execute("update feeds set enabled=0 where id=?",(fid,))
-                stop_rounds(db,fid)
+                stop_rounds(db,fid,speed_only=True)
         return {"ok":True}
 
 
@@ -313,28 +339,35 @@ def entries(body):
 def refresh(store):
     now=time.time()
     speed_ready=ready()
+    schedule_ping=ping_schedule_ready()
     if not ping_ready() or maintenance(now):
         return
     with store.db(True) as db:
         request=db.execute("""select r.id round_id,r.iface,f.url,r.ping_only from feed_rounds r
-            join feeds f on f.id=r.feed where r.state='pending' and (r.ping_only or ?)
-            order by r.id limit 1""",(speed_ready,)).fetchone()
+            join feeds f on f.id=r.feed where r.state='pending'
+            and ((r.ping_only and (r.kind!='scheduled' or ?)) or (not r.ping_only and ?))
+            order by r.id limit 1""",(schedule_ping,speed_ready)).fetchone()
         if request:
             rid,iface,url,ping_only=request
             db.execute("update feed_rounds set state='loading' where id=?",(rid,))
         else:
-            if not speed_ready:
+            if not (speed_ready or schedule_ping):
                 return
-            ping_only=False
-            feed=db.execute(f"""select * from feeds f where not deleted and enabled and due<=? and not exists(
+            feed=db.execute(f"""with scheduled as (
+                select id,due,0 as ping_only from feeds where ? and enabled and due<=?
+                union all select id,ping_due,1 from feeds where ? and ping_hours>0 and ping_due<=?
+                ) select f.*,s.ping_only from scheduled s join feeds f on f.id=s.id where not f.deleted and not exists(
                 select 1 from feed_rounds r where r.feed=f.id and ({ACTIVE_ROUND}))
-                order by due,id limit 1""",(now,)).fetchone()
+                order by s.due,s.ping_only,s.id limit 1""",(speed_ready,now,schedule_ping,now)).fetchone()
             if not feed:
                 return
-            iface,url=feed["iface"],feed["url"]
-            rid=db.execute("""insert into feed_rounds(feed,iface,created,kind,state)
-                values(?,?,?,'scheduled','loading')""",(feed["id"],iface,now)).lastrowid
-            db.execute("update feeds set due=? where id=?",(now+3600*feed["hours"],feed["id"]))
+            iface,url,ping_only=feed["iface"],feed["url"],feed["ping_only"]
+            rid=db.execute("""insert into feed_rounds(feed,iface,created,kind,state,ping_only)
+                values(?,?,?,'scheduled','loading',?)""",(feed["id"],iface,now,ping_only)).lastrowid
+            if ping_only:
+                db.execute("update feeds set ping_due=? where id=?",(now+3600*feed["ping_hours"],feed["id"]))
+            else:
+                db.execute("update feeds set due=? where id=?",(now+3600*feed["hours"],feed["id"]))
     try:
         require_link(iface)
         accepted,rejected=entries(download(store.cipher.decrypt(url).decode(),iface))
@@ -342,7 +375,7 @@ def refresh(store):
         code="interface_unavailable" if isinstance(exc,Failure) else "feed_refresh_failed"
         with store.db(True) as db:
             db.execute("update feed_rounds set state='ready',error=? where id=? and state='loading'",(code,rid))
-            if not request:
+            if not request and not ping_only:
                 db.execute("""update feeds set error=?,due=? where id=? and enabled and due=?
                     and exists(select 1 from feed_rounds where id=? and error=?)""",
                     (code,now+300,feed["id"],now+3600*feed["hours"],rid,code))

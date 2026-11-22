@@ -21,7 +21,7 @@ from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, SecretStr, ValidationError
 
-from .feeds import ACTIVE_ROUND, queue_round
+from .feeds import ACTIVE_ROUND, MAX_PERIOD_HOURS, queue_round, set_relay_schedule
 
 
 REMOTE_USER = "mobocloud-relay"
@@ -29,6 +29,8 @@ ACK_ERRORS = {
     "missing": "The subscription is unavailable.",
     "interface_unavailable": "The network interface in Iran is unavailable.",
     "subscription_speed_policy_disabled": "Subscription speed testing is disabled on Mobocloud.",
+    "subscription_ping_disabled": "Live ping testing is disabled on Mobocloud.",
+    "subscription_ping_schedule_disabled": "Enable live testing and subscription scheduling on Mobocloud first.",
 }
 SETUP_ERRORS = {
     b"relay_remote_permissions", b"relay_remote_directory_conflict", b"relay_remote_health",
@@ -212,12 +214,16 @@ def report_text(db, row):
         (row["id"],)).fetchall()
     answered = sum(sample["ping"] is not None or bool(sample["download_ok"] or sample["upload_ok"])
                    for sample in observations)
+    metrics = [("ping", "Ping", "ms", ".0f")]
+    if not row["ping_only"]:
+        metrics.extend([("download", "Download", "Mbps", ".1f"), ("upload", "Upload", "Mbps", ".1f")])
     values=[]
-    for key, title, unit in (("ping","Ping","ms"),("download","Download","Mbps"),("upload","Upload","Mbps")):
+    for key, title, unit, precision in metrics:
         measured=[sample[key] for sample in observations if sample[key] is not None]
-        values.append(f"{title}: {statistics.median(measured):.1f} {unit}" if measured else f"{title}: unavailable")
+        values.append(f"{title}: {statistics.median(measured):{precision}} {unit}" if measured else f"{title}: unavailable")
     description = "Scheduled" if row["kind"] == "scheduled" else "Manual"
-    lines=[f"Mobocloud · {safe_name(row['name'])} · round #{row['id']}", f"{description} test in Iran",
+    mode = "ping test" if row["ping_only"] else "test"
+    lines=[f"Mobocloud · {safe_name(row['name'])} · round #{row['id']}", f"{description} {mode} in Iran",
            f"{answered}/{len(observations)} configurations responded · {row['rejected']} rejected · {row['skipped']} skipped",
            "Median of measured results", *values]
     if row["error"]:
@@ -280,8 +286,9 @@ class Relay:
                 raise RelayError("relay_credentials_invalid") from None
             link = config["link_id"]
             with self.store.db() as db:
-                feeds = [dict(id=row["id"], name=safe_name(row["name"])) for row in db.execute(
-                    "select id,name from feeds where not deleted order by id limit 150")]
+                feeds = [dict(row, name=safe_name(row["name"])) for row in db.execute("""
+                    select id,name,ping_hours,case when enabled then hours else 0 end speed_hours
+                    from feeds where not deleted order by id limit 150""")]
                 rounds = db.execute(f"""select r.*,f.name from feed_rounds r join feeds f on f.id=r.feed
                     where r.created>=? and not ({ACTIVE_ROUND}) and
                     (r.kind='scheduled' or exists(select 1 from telegram_commands c where c.link=? and c.round_id=r.id))
@@ -291,7 +298,7 @@ class Relay:
                 acks = [dict(row) for row in db.execute(
                     "select id,reply as text from telegram_commands where link=? and acknowledged=0 order by id limit 25",
                     (link,))]
-            reply = exchange(config, dict(feeds=feeds,reports=reports,acks=acks))
+            reply = exchange(config, dict(feeds=feeds,reports=reports,acks=acks,schedule_version=1))
             with self.store.db(True) as db:
                 if not db.execute("update telegram_link set last_ok=?,error=null where secret=?",
                                   (time.time(),credential)).rowcount:
@@ -316,13 +323,33 @@ class Relay:
             raise RelayError("relay_response_invalid")
         if db.execute("select 1 from telegram_commands where link=? and id=?",(link,command)).fetchone():
             return
+        operation = item.get("operation", "speed")
+        if operation not in ("speed", "ping", "speed_schedule", "ping_schedule"):
+            raise RelayError("relay_response_invalid")
+        ping_only = operation.startswith("ping")
         rid = None
         try:
-            result = queue_round(db,feed,cloudflare_upload=True)
-            rid = result["id"]
-            reply = f"Round #{rid} queued on Mobocloud in Iran." if result["queued"] else f"Round #{rid} is already in progress."
+            if operation.endswith("_schedule"):
+                hours = item.get("hours")
+                if type(hours) is not int or not 0 <= hours <= MAX_PERIOD_HOURS:
+                    reply = f"Choose 1 to {MAX_PERIOD_HOURS} hours, or 0 to turn off the schedule."
+                else:
+                    set_relay_schedule(db,feed,ping_only=ping_only,hours=hours)
+                    mode = "Ping" if ping_only else "Speed"
+                    reply = f"{mode} for #{feed}: every {hours} h." if hours else f"{mode} schedule for #{feed} is off."
+            else:
+                result = queue_round(db,feed,cloudflare_upload=not ping_only,ping_only=ping_only)
+                rid = result["id"]
+                mode = db.execute("select ping_only from feed_rounds where id=?", (rid,)).fetchone()["ping_only"]
+                if bool(mode) != ping_only:
+                    rid = None
+                    reply = "Another test is running for this subscription. Try again after it finishes."
+                elif result["queued"]:
+                    reply = f"Round #{rid} queued on Mobocloud in Iran."
+                else:
+                    reply = f"Round #{rid} is already in progress."
         except HTTPException as exc:
-            reply = ACK_ERRORS.get(exc.detail, "Mobocloud could not queue this test.")
+            reply = ACK_ERRORS.get(exc.detail, "Mobocloud could not apply this request.")
         db.execute("insert into telegram_commands(link,id,round_id,reply) values(?,?,?,?)",(link,command,rid,reply))
 
     def loop(self, stop):

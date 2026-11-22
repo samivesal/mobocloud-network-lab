@@ -150,23 +150,25 @@ function drawFeeds(data) {
 
   paint(document.querySelector("#feeds"), feeds.map(feed => {
     const batch = feed.progress;
-    const status = feed.busy ? "در حال تست" : feed.enabled ? "فعال" : "متوقف";
+    const scheduled = feed.enabled || feed.ping_hours > 0;
+    const status = feed.busy ? "در حال تست" : scheduled ? "فعال" : "متوقف";
+    const periods = [...new Set([12, 24, feed.hours])].sort((a, b) => a - b);
     const progress = feed.busy ? (batch?.total
       ? `<div class="progress">${number.format(batch.done)} از ${number.format(batch.total)} کانفیگ تست شد
            <progress max="${batch.total}" value="${batch.done}" aria-label="پیشرفت تست"></progress></div>`
       : '<p class="progress">در صف دریافت اشتراک</p>') : "";
     return `<article class="panel feed-card">
-      <div class="feed-head"><h3>${escape(feed.name)}</h3><span class="badge ${feed.busy ? "running" : feed.enabled ? "success" : "muted"}">${status}</span></div>
-      <dl><dt>اتصال</dt><dd><bdi>${escape(feed.iface)}</bdi></dd><dt>اجرای بعدی</dt><dd>${feed.enabled ? (feed.due ? time(feed.due) : "در انتظار اجرا") : "—"}</dd></dl>
+      <div class="feed-head"><h3>${escape(feed.name)}</h3><span class="badge ${feed.busy ? "running" : scheduled ? "success" : "muted"}">${status}</span></div>
+      <dl><dt>اتصال</dt><dd><bdi>${escape(feed.iface)}</bdi></dd><dt>تست سرعت بعدی</dt><dd>${feed.enabled ? (feed.due ? time(feed.due) : "در انتظار اجرا") : "—"}</dd>
+      ${feed.ping_hours > 0 ? `<dt>پینگ بعدی</dt><dd>${feed.ping_due ? time(feed.ping_due) : "در انتظار اجرا"}</dd>` : ""}</dl>
       ${progress}
       <div class="actions" data-feed="${feed.id}">
         <button class="primary" data-action="run" ${feed.busy || !data.ready ? "disabled" : ""}>تست فوری Cloudflare</button>
         <button data-action="ping" ${feed.busy || !data.ping_ready ? "disabled" : ""}>فقط پینگ</button>
-        <button data-action="toggle" data-enabled="${feed.enabled ? 0 : 1}" ${!feed.enabled && !data.ready ? "disabled" : ""}>${feed.enabled ? "توقف" : "ادامه"}</button>
+        <button data-action="toggle" data-enabled="${feed.enabled ? 0 : 1}" ${!feed.enabled && !data.ready ? "disabled" : ""}>${feed.enabled ? "توقف تست سرعت" : "ادامهٔ تست سرعت"}</button>
         <button data-action="delete" class="danger">حذف اشتراک</button>
         <select data-action="period" aria-label="دورهٔ اجرای ${escape(feed.name)}">
-          <option value="12" ${feed.hours === 12 ? "selected" : ""}>هر ۱۲ ساعت</option>
-          <option value="24" ${feed.hours === 24 ? "selected" : ""}>هر ۲۴ ساعت</option>
+          ${periods.map(hours => `<option value="${hours}" ${feed.hours === hours ? "selected" : ""}>هر ${number.format(hours)} ساعت</option>`).join("")}
         </select>
       </div>
     </article>`;
@@ -220,7 +222,8 @@ function drawRounds() {
     if (batch.skipped) messages.push(`${number.format(batch.skipped)} کانفیگ وارد صف نشد`);
     if (batch.error) messages.push(errorText(batch.error));
     const expanded = open.get(batch.id) ?? index === 0;
-    const kind = batch.ping_only ? "فقط پینگ" : ({manual:"اجرای فوری", scheduled:"دوره‌ای", legacy:"دور قبلی"})[batch.kind];
+    const kind = batch.ping_only ? (batch.kind === "scheduled" ? "پینگ دوره‌ای" : "فقط پینگ")
+      : ({manual:"اجرای فوری", scheduled:"دوره‌ای", legacy:"دور قبلی"})[batch.kind];
     return `<details data-round="${batch.id}" ${expanded ? "open" : ""}>
       <summary><bdi>${escape(batch.name)}</bdi> · ${kind} ${time(batch.created)}</summary>
       <div class="round-inner">

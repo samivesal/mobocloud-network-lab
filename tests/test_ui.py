@@ -50,8 +50,8 @@ class BrowserTests(unittest.TestCase):
                     tab.locator('input[name="password"]').fill("fixture-password-123")
                     tab.get_by_role("button", name="ورود", exact=True).click()
                     tab.get_by_role("heading", name="تست اشتراک", exact=True).wait_for()
-                    tab.get_by_role("button", name="توقف", exact=True).click()
-                    tab.get_by_role("button", name="ادامه", exact=True).wait_for()
+                    tab.get_by_role("button", name="توقف تست سرعت", exact=True).click()
+                    tab.get_by_role("button", name="ادامهٔ تست سرعت", exact=True).wait_for()
                     self.assertEqual(store.rows("select enabled from feeds"), [{"enabled":0}])
                     for width in (1280, 390):
                         tab.set_viewport_size({"width":width, "height":900})
