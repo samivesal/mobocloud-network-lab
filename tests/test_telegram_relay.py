@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.parse import quote
 
 from cryptography.fernet import Fernet
 
@@ -32,6 +33,75 @@ def callback(number, chat, text):
 
 
 class TelegramRelayTests(unittest.TestCase):
+    @patch.dict(os.environ, LAB_LIVE="1", LAB_SPEED="1", LAB_SCHEDULE="1", LAB_PAUSE_UTC="",
+                LAB_CHECK_URL="https://example.org/check", LAB_DOWNLOAD_URL="https://example.org/down")
+    def test_detailed_reports_keep_all_pages_after_a_lost_acknowledgement(self):
+        report_names = [f"Node {i:03d}" for i in range(240)]
+        lines = [URI.replace("example.org", f"node{i}.example.org") + "#" + quote(name + " " + "🌐" * 30)
+                 for i, name in enumerate(report_names)]
+        disabled = URI.replace("example.org", "disabled.example.org")
+        lines.extend([disabled + "#Skipped%20node", URI.replace("example.org", "127.0.0.1") + "#Rejected%20node",
+                      URI + "#" + quote("Redacted node https://example.org/private-subscription")])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = Store(root / "local.sqlite", Fernet.generate_key())
+            bridge = root / "bridge.sqlite"
+            with database(bridge) as db:
+                initialize(db)
+            with store.db(True) as db:
+                db.execute("insert into feeds(name,url,iface,hours,enabled,due) values('Fixture',?,'lo',12,1,0)",
+                           (store.cipher.encrypt(b"fixture"),))
+                db.execute("insert into telegram_link(id,secret) values(1,?)",
+                           (store.cipher.encrypt(b'{"link_id":"fixture","since":0}'),))
+                cid = store.add(db, parse(disabled), "Disabled", "Other", "")
+                db.execute("update configs set enabled=0 where id=?", (cid,))
+            with patch("lab.feeds.require_link"), patch("lab.feeds.download", return_value="\n".join(lines)):
+                refresh(store)
+            with store.db(True) as db:
+                for job in db.execute("select * from jobs order by id").fetchall():
+                    if job["id"] == 2:
+                        result = {"ok":False, "error":"timeout", "ping_error":"timeout", "upload":{"error":"timeout"}}
+                    else:
+                        result = {"ok":True,"ping_ms":30,"mbps":12,"upload":{"ok":True,"mbps":6}}
+                    store.record(db, job, {"ok": True}, result)
+                db.execute("update jobs set state='done'")
+
+            sent_batches = []
+
+            def exchange(_, payload):
+                sent_batches.append([report["id"] for report in payload["reports"]])
+                self.assertLess(len(json.dumps(payload)), 120_000)
+                with database(bridge) as db:
+                    response = synchronize(db, payload)
+                if len(sent_batches) == 1:
+                    raise RelayError("relay_unavailable")
+                return response
+
+            relay = Relay(store)
+            with patch("lab.telegram_agent.exchange", side_effect=exchange):
+                relay.poll()
+                self.assertEqual(store.rows("select round_id from telegram_reports"), [])
+                relay.poll()
+                self.assertEqual(sent_batches[0], sent_batches[1])
+                for _ in range(6):
+                    relay.poll()
+            self.assertEqual(store.rows("select round_id from telegram_reports"), [{"round_id": 1}])
+            self.assertEqual(store.rows("select part from telegram_report_outbox"), [])
+            self.assertEqual(sent_batches[-1], [])
+            with database(bridge) as db:
+                pages = [row["text"] for row in db.execute("select text from outgoing order by rowid")]
+            self.assertGreater(len(pages), 8)
+            self.assertTrue(all(len(page.encode("utf-16-le")) // 2 < 3500 for page in pages))
+            report = "\n".join(pages)
+            for name in report_names:
+                self.assertEqual(report.count(name), 1)
+            self.assertIn("VLESS / WS", report)
+            self.assertIn("Ping: 30 ms · Download: 12.0 Mbps · Upload: 6.0 Mbps", report)
+            self.assertIn("Ping: timeout · Download: timeout · Upload: timeout", report)
+            self.assertIn("Skipped node\nSkipped", report)
+            self.assertIn("Rejected node\nRejected", report)
+            self.assertNotIn("private-subscription", report)
+
     @patch.dict(os.environ, LAB_LIVE="1", LAB_SPEED="1", LAB_SCHEDULE="1", LAB_PAUSE_UTC="",
                 LAB_CHECK_URL="https://example.org/check", LAB_DOWNLOAD_URL="https://example.org/down")
     def test_bot_sets_independent_schedules_and_reports_results(self):

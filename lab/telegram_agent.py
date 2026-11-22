@@ -12,7 +12,6 @@ import re
 import secrets
 import shlex
 import sqlite3
-import statistics
 import subprocess
 import tempfile
 import time
@@ -25,6 +24,11 @@ from .feeds import ACTIVE_ROUND, MAX_PERIOD_HOURS, queue_round, set_relay_schedu
 
 
 REMOTE_USER = "mobocloud-relay"
+REPORT_PAGE_LIMIT = 3300  # UTF-16 units, with room for the page number.
+SYNC_PAYLOAD_LIMIT = 120_000  # Includes room for the secret and the bridge's JSON framing.
+PRIVATE_LABEL_TEXT = re.compile(
+    r"\S+://\S+|\b[0-9]{5,20}:[A-Za-z0-9_-]{20,}\b|"
+    r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", re.IGNORECASE)
 ACK_ERRORS = {
     "missing": "The subscription is unavailable.",
     "interface_unavailable": "The network interface in Iran is unavailable.",
@@ -65,6 +69,9 @@ def setup(db):
         primary key(link,id))""")
     db.execute("""create table if not exists telegram_reports(
         link text, round_id integer, primary key(link,round_id))""")
+    db.execute("""create table if not exists telegram_report_outbox(
+        link text, round_id integer, part integer, text text not null,
+        primary key(link,round_id,part))""")
 
 
 def child(args, *, payload=None, timeout=20, env=None, error="relay_unavailable"):
@@ -202,33 +209,95 @@ def exchange(config, payload):
         raise RelayError("relay_response_invalid") from None
 
 
-def safe_name(value):
-    return " ".join(re.sub(r"\S+://\S+", "[link hidden]", value).split())[:80] or "Subscription"
+def safe_name(value, fallback="Subscription", limit=80):
+    text = " ".join(PRIVATE_LABEL_TEXT.sub("[hidden]", value).split())
+    return text.encode("utf-16-le")[:2 * limit].decode("utf-16-le", errors="ignore") or fallback
 
 
-def report_text(db, row):
-    observations = db.execute("""select json_extract(s.result,'$.ping_ms') ping,
+def report_metric(title, value, unit, precision, error=None, samples=None, total=None):
+    if value is None:
+        reason = safe_name(error, "", 36).replace("_", " ") if error else ""
+        measured = f"{title}: {reason or 'unavailable'}"
+    else:
+        measured = f"{title}: {value:{precision}} {unit}"
+    return f"{measured} ({samples}/{total})" if samples is not None and total else measured
+
+
+def report_pages(db, row):
+    observations = db.execute("""select f.label,c.protocol,c.transport,j.state,j.error,
+        json_extract(s.result,'$.ping_ms') ping,
+        json_extract(s.result,'$.ping_error') ping_error,
+        json_extract(s.result,'$.ping_sample_ok') ping_ok,
+        json_extract(s.result,'$.ping_sample_total') ping_total,
         json_extract(s.result,'$.mbps') download, json_extract(s.result,'$.upload.mbps') upload,
-        json_extract(s.result,'$.ok') download_ok, json_extract(s.result,'$.upload.ok') upload_ok
-        from feed_jobs f join jobs j on j.id=f.job left join samples s on s.job=j.id where f.round=?""",
+        json_extract(s.result,'$.error') download_error, json_extract(s.result,'$.upload.error') upload_error,
+        json_extract(s.result,'$.sample_ok') download_ok, json_extract(s.result,'$.sample_total') download_total,
+        json_extract(s.result,'$.upload.sample_ok') upload_ok, json_extract(s.result,'$.upload.sample_total') upload_total
+        from feed_jobs f join jobs j on j.id=f.job join configs c on c.id=j.config
+        left join samples s on s.job=j.id where f.round=? order by j.id""",
         (row["id"],)).fetchall()
-    answered = sum(sample["ping"] is not None or bool(sample["download_ok"] or sample["upload_ok"])
-                   for sample in observations)
-    metrics = [("ping", "Ping", "ms", ".0f")]
-    if not row["ping_only"]:
-        metrics.extend([("download", "Download", "Mbps", ".1f"), ("upload", "Upload", "Mbps", ".1f")])
-    values=[]
-    for key, title, unit, precision in metrics:
-        measured=[sample[key] for sample in observations if sample[key] is not None]
-        values.append(f"{title}: {statistics.median(measured):{precision}} {unit}" if measured else f"{title}: unavailable")
+    blocks = []
+    for sample in observations:
+        label = safe_name(sample["label"], "Configuration", 100)
+        protocol = safe_name(sample["protocol"], "", 32).upper()
+        transport = safe_name(sample["transport"], "", 32).upper()
+        status = (sample["error"] or sample["state"]) if sample["state"] != "done" else sample["error"]
+        metrics = [report_metric("Ping", sample["ping"], "ms", ".0f", sample["ping_error"] or status,
+                                 sample["ping_ok"], sample["ping_total"])]
+        if not row["ping_only"]:
+            metrics.extend([
+                report_metric("Download", sample["download"], "Mbps", ".1f", sample["download_error"] or status,
+                              sample["download_ok"], sample["download_total"]),
+                report_metric("Upload", sample["upload"], "Mbps", ".1f", sample["upload_error"] or status,
+                              sample["upload_ok"], sample["upload_total"]),
+            ])
+        blocks.append(f"{label} · {protocol} / {transport}\n" + " · ".join(metrics))
+    for item in db.execute("select label,error from feed_skips where round=? order by rowid", (row["id"],)):
+        label = safe_name(item["label"], "Configuration", 100)
+        reason = safe_name(item["error"], "unavailable", 36).replace("_", " ")
+        blocks.append(f"{label}\nSkipped · {reason}")
+    for item in db.execute("select label from feed_rejections where round=? order by position", (row["id"],)):
+        blocks.append(f"{safe_name(item['label'], 'Configuration', 100)}\nRejected · unsupported or restricted configuration")
+
     description = "Scheduled" if row["kind"] == "scheduled" else "Manual"
     mode = "ping test" if row["ping_only"] else "test"
-    lines=[f"Mobocloud · {safe_name(row['name'])} · round #{row['id']}", f"{description} {mode} in Iran",
-           f"{answered}/{len(observations)} configurations responded · {row['rejected']} rejected · {row['skipped']} skipped",
-           "Median of measured results", *values]
+    lines = [f"Mobocloud · {safe_name(row['name'])} · round #{row['id']}", f"{description} {mode} in Iran",
+             f"{len(observations)} configurations · {row['rejected']} rejected · {row['skipped']} skipped"]
     if row["error"]:
-        lines.append("Round error: "+row["error"])
-    return "\n".join(lines)
+        lines.append("Round status: " + safe_name(row["error"], "unavailable"))
+    header = "\n".join(lines)
+    header_size = len(header.encode("utf-16-le")) // 2
+    pages, current, size = [], [], header_size
+    for number, block in enumerate(blocks, 1):
+        line = f"\n\n{number}. {block}"
+        units = len(line.encode("utf-16-le")) // 2
+        if current and size + units > REPORT_PAGE_LIMIT:
+            pages.append("".join(current))
+            current, size = [], header_size
+        current.append(line)
+        size += units
+    pages.append("".join(current))
+    if len(pages) == 1:
+        return [header + pages[0]]
+    return [f"{header}\nPage {part}/{len(pages)}{body}" for part, body in enumerate(pages, 1)]
+
+
+def report_key(round_id, part):
+    return str(round_id) if part == 0 else f"{round_id}:{part + 1}"
+
+
+def pending_reports(db, link, since):
+    rounds = db.execute(f"""select r.*,f.name from feed_rounds r join feeds f on f.id=r.feed
+        where r.created>=? and not ({ACTIVE_ROUND}) and
+        (r.kind='scheduled' or exists(select 1 from telegram_commands c where c.link=? and c.round_id=r.id))
+        and not exists(select 1 from telegram_reports t where t.link=? and t.round_id=r.id)
+        and not exists(select 1 from telegram_report_outbox o where o.link=? and o.round_id=r.id)
+        order by r.id limit 8""", (since, link, link, link)).fetchall()
+    for row in rounds:
+        db.executemany("insert into telegram_report_outbox values(?,?,?,?)",
+                       ((link, row["id"], part, text) for part, text in enumerate(report_pages(db, row))))
+    return db.execute("""select round_id,part,text from telegram_report_outbox where link=?
+        order by round_id,part limit 8""", (link,)).fetchall()
 
 
 class Relay:
@@ -273,6 +342,7 @@ class Relay:
                            (credential,time.time()))
                 db.execute("delete from telegram_commands")
                 db.execute("delete from telegram_reports")
+                db.execute("delete from telegram_report_outbox")
 
     def poll(self):
         rows = self.store.rows("select secret from telegram_link where id=1")
@@ -285,28 +355,38 @@ class Relay:
             except InvalidToken:
                 raise RelayError("relay_credentials_invalid") from None
             link = config["link_id"]
-            with self.store.db() as db:
+            with self.store.db(True) as db:
+                if not db.execute("select 1 from telegram_link where secret=?", (credential,)).fetchone():
+                    return
                 feeds = [dict(row, name=safe_name(row["name"])) for row in db.execute("""
                     select id,name,ping_hours,case when enabled then hours else 0 end speed_hours
                     from feeds where not deleted order by id limit 150""")]
-                rounds = db.execute(f"""select r.*,f.name from feed_rounds r join feeds f on f.id=r.feed
-                    where r.created>=? and not ({ACTIVE_ROUND}) and
-                    (r.kind='scheduled' or exists(select 1 from telegram_commands c where c.link=? and c.round_id=r.id))
-                    and not exists(select 1 from telegram_reports t where t.link=? and t.round_id=r.id)
-                    order by r.id limit 8""",(config["since"],link,link)).fetchall()
-                reports = [dict(id=row["id"],text=report_text(db,row)) for row in rounds]
+                pending = pending_reports(db, link, config["since"])
                 acks = [dict(row) for row in db.execute(
                     "select id,reply as text from telegram_commands where link=? and acknowledged=0 order by id limit 25",
                     (link,))]
-            reply = exchange(config, dict(feeds=feeds,reports=reports,acks=acks,schedule_version=1))
+            payload = dict(feeds=feeds, reports=[], acks=acks, schedule_version=1)
+            size = len(json.dumps(payload))
+            for page in pending:
+                report = dict(id=report_key(page["round_id"], page["part"]), text=page["text"])
+                size += len(json.dumps(report)) + 2
+                if size > SYNC_PAYLOAD_LIMIT:
+                    break
+                payload["reports"].append(report)
+            reply = exchange(config, payload)
             with self.store.db(True) as db:
                 if not db.execute("update telegram_link set last_ok=?,error=null where secret=?",
                                   (time.time(),credential)).rowcount:
                     return
-                accepted = set(reply["accepted"])
-                for row in reports:
-                    if row["id"] in accepted:
-                        db.execute("insert or ignore into telegram_reports values(?,?)",(link,row["id"]))
+                accepted = set(reply["accepted"]) & {report["id"] for report in payload["reports"]}
+                for page in pending:
+                    rid, part = page["round_id"], page["part"]
+                    if report_key(rid, part) in accepted:
+                        db.execute("delete from telegram_report_outbox where link=? and round_id=? and part=?",
+                                   (link, rid, part))
+                        db.execute("""insert or ignore into telegram_reports select ?,? where not exists
+                            (select 1 from telegram_report_outbox where link=? and round_id=?)""",
+                                   (link, rid, link, rid))
                 for command in reply["acknowledged"]:
                     db.execute("update telegram_commands set acknowledged=1 where link=? and id=?",(link,command))
                 for item in reply["commands"][:25]:

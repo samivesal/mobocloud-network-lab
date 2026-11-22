@@ -34,6 +34,8 @@ def setup(db):
       rejected integer default 0,skipped integer default 0,error text);
     create table if not exists feed_skips(round integer not null references feed_rounds(id) on delete cascade,
       label text not null,error text not null);
+    create table if not exists feed_rejections(round integer not null references feed_rounds(id) on delete cascade,
+      position integer not null,label text not null,primary key(round,position));
     create index if not exists feed_skips_round on feed_skips(round);
     """)
     db.execute("begin immediate")
@@ -316,7 +318,7 @@ def routes(api,store):
         return {"ok":True}
 
 
-def entries(body):
+def entries(body, *, rejected_entries=None):
     if body.lstrip().startswith("{"):
         return [("1",parse_document(body)[0])],0
     if "://" not in body:
@@ -333,6 +335,9 @@ def entries(body):
             accepted.append((label,out))
         except (ValueError,TypeError,KeyError,IndexError,AttributeError):
             rejected+=1
+            if rejected_entries is not None:
+                label = unquote(line.partition("#")[2])[:100] or str(i)
+                rejected_entries.append((i, label))
     return accepted,rejected
 
 
@@ -368,9 +373,10 @@ def refresh(store):
                 db.execute("update feeds set ping_due=? where id=?",(now+3600*feed["ping_hours"],feed["id"]))
             else:
                 db.execute("update feeds set due=? where id=?",(now+3600*feed["hours"],feed["id"]))
+    rejected_entries = []
     try:
         require_link(iface)
-        accepted,rejected=entries(download(store.cipher.decrypt(url).decode(),iface))
+        accepted,rejected=entries(download(store.cipher.decrypt(url).decode(),iface), rejected_entries=rejected_entries)
     except Exception as exc:
         code="interface_unavailable" if isinstance(exc,Failure) else "feed_refresh_failed"
         with store.db(True) as db:
@@ -384,6 +390,8 @@ def refresh(store):
         batch=db.execute("select feed,state from feed_rounds where id=?",(rid,)).fetchone()
         if not batch or batch["state"]!="loading":
             return
+        db.executemany("insert into feed_rejections(round,position,label) values(?,?,?)",
+                       ((rid, position, label) for position, label in rejected_entries))
         fid=batch["feed"]
         ids=set()
         queued=skipped=0
