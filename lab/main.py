@@ -8,6 +8,7 @@ import getpass
 import hashlib
 import hmac
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -39,10 +40,17 @@ def digest(password,salt):
     return hashlib.scrypt(password.encode(),salt=salt,n=16384,r=8,p=1)
 
 
-def password_fields(confirm=False):
+def strong_password(password):
+    return (12 <= len(password) <= 512 and len(set(password)) >= 6
+            and password.casefold() not in {"password1234", "password12345", "administrator", "123456789012"})
+
+
+def password_fields(confirm=False, require_strong=False):
     password=getpass.getpass("New administrator password: ")
     if not password.strip() or len(password)>512:
         raise SystemExit("Enter a non-empty administrator password of up to 512 characters.")
+    if require_strong and not strong_password(password):
+        raise SystemExit("Use a strong administrator password of at least 12 characters for remote access.")
     if confirm and password!=getpass.getpass("Repeat the new password: "):
         raise SystemExit("The passwords do not match.")
     salt=secrets.token_bytes(16)
@@ -59,13 +67,22 @@ def initialize():
 
 def reset_password():
     from .manage import replace_text
+    from .remote_access import locked, status
     os.umask(0o077)
     path=KEY/"identity.json"
-    original=path.read_text()
-    identity=json.loads(original)
+    if os.geteuid() == 0 and KEY == Path("/etc/mobohub-network-lab/keys"):
+        with locked():
+            update_password(path, replace_text, bool(status().get("remote_url")))
+    else:
+        update_password(path, replace_text, False)
+
+
+def update_password(path, replace_text, require_strong):
+    original = path.read_text()
+    identity = json.loads(original)
     Fernet(identity["key"].encode())
-    identity.update(password_fields(confirm=True))
-    replace_text(path,json.dumps(identity),expected=original)
+    identity.update(password_fields(confirm=True, require_strong=require_strong))
+    replace_text(path, json.dumps(identity), expected=original)
 
 
 class Import(BaseModel):
@@ -100,6 +117,7 @@ def create():
     relay=Relay(store)
     sessions={}
     attempts=collections.deque()
+    from .remote_access import status as remote_status
 
     @contextlib.asynccontextmanager
     async def lifetime(app):
@@ -116,7 +134,8 @@ def create():
                 relay_thread.join()
                 thread.join()
 
-    app=FastAPI(title="Mobocloud Network Lab",lifespan=lifetime,openapi_url=None,docs_url=None,redoc_url=None)
+    app=FastAPI(title="Mobocloud Network Lab",lifespan=lifetime,openapi_url=None,docs_url=None,
+                redoc_url=None,redirect_slashes=False)
 
     @app.exception_handler(RequestValidationError)
     async def invalid(req,exc):
@@ -124,7 +143,23 @@ def create():
 
     @app.middleware("http")
     async def boundary(req,call_next):
+        peer = req.client.host if req.client else ""
+        remote = peer == "127.0.0.1" and req.headers.get("x-mobocloud-remote") == "1"
+        req.state.remote = remote
+        req.state.client_ip = peer
+        if remote:
+            try:
+                req.state.client_ip = str(ipaddress.IPv4Address(req.headers.get("x-real-ip", "")))
+            except ValueError:
+                return JSONResponse({"detail":"invalid_proxy_client"}, 400)
+            if req.url.path in ("/health", PREFIX + "/openapi.json") or req.url.path.startswith(PREFIX + "/agent-batches/"):
+                return JSONResponse({"detail":"missing"}, 404)
         if req.method not in ("GET","HEAD"):
+            secure_origin = remote or os.getenv("LAB_HTTPS")=="1"
+            expected_origin = f"{'https' if secure_origin else req.url.scheme}://{req.url.netloc}"
+            origin = req.headers.get("origin")
+            if (origin is not None and origin != expected_origin) or req.headers.get("sec-fetch-site") == "cross-site":
+                return JSONResponse({"detail":"request_origin_rejected"},403)
             if req.headers.get("x-lab-request")!="1":
                 return JSONResponse({"detail":"request_header_required"},403)
             try:
@@ -141,40 +176,51 @@ def create():
         return resp
 
     def auth(req:Request):
-        if sessions.get(req.cookies.get("lab_session"),0)<time.time():
+        expires, remote = sessions.get(req.cookies.get("lab_session"), (0, False))
+        if expires <= time.monotonic() or remote != req.state.remote:
             raise HTTPException(401,"login_required")
 
     from fastapi import APIRouter
     api=APIRouter(prefix=PREFIX,dependencies=[Depends(auth)])
 
     @app.post(PREFIX+"/login")
-    async def login(data:Login,response:Response):
-        now=time.time()
-        while attempts and attempts[0]<now-60:
+    async def login(req:Request,data:Login,response:Response):
+        now=time.monotonic()
+        client_ip = req.state.client_ip
+        while attempts and attempts[0][0]<now-60:
             attempts.popleft()
-        if len(attempts)>=8:
+        same_network = [ip for _, remote, ip in attempts if remote == req.state.remote]
+        if len(same_network)>=120 or same_network.count(client_ip)>=8:
             raise HTTPException(429,"retry_later")
         if not hmac.compare_digest(digest(data.password,bytes.fromhex(identity["salt"])).hex(),identity["password"]):
-            attempts.append(now)
+            attempts.append((now, req.state.remote, client_ip))
             raise HTTPException(401,"invalid_login")
-        for k,v in list(sessions.items()):
-            if v<=now:
+        for k,(expires, _) in list(sessions.items()):
+            if expires<=now:
                 del sessions[k]
+        if len(sessions)>=256:
+            del sessions[next(iter(sessions))]
         token=secrets.token_urlsafe(32)
-        sessions[token]=now+28800
-        response.set_cookie("lab_session",token,httponly=True,samesite="strict",max_age=28800,secure=os.getenv("LAB_HTTPS")=="1")
+        sessions[token]=(now+28800, req.state.remote)
+        response.set_cookie("lab_session",token,httponly=True,samesite="strict",max_age=28800,
+                            secure=req.state.remote or os.getenv("LAB_HTTPS")=="1")
         return {"ok":True}
 
     @api.post("/logout")
     def logout(req:Request,response:Response):
         sessions.pop(req.cookies.get("lab_session"),None)
-        response.delete_cookie("lab_session")
+        response.delete_cookie("lab_session", httponly=True, samesite="strict",
+                               secure=req.state.remote or os.getenv("LAB_HTTPS")=="1")
         return {"ok":True}
 
     @app.get("/health")
     def health():
         store.rows("select 1")
         return {"worker_alive":time.time()-worker.pulse<120}
+
+    @api.get("/remote-access")
+    def remote_access_status():
+        return dict(remote_status(), worker_alive=time.time()-worker.pulse<120)
 
     @api.get("/openapi.json")
     def spec():
@@ -356,4 +402,5 @@ if __name__=="__main__":
             raise SystemExit(f"Could not update administrator identity: {exc}") from None
     else:
         import uvicorn
-        uvicorn.run(create(),host="127.0.0.1",port=int(os.getenv("LAB_PORT","8765")),access_log=False)
+        uvicorn.run(create(),host="127.0.0.1",port=int(os.getenv("LAB_PORT","8765")),
+                    access_log=False,proxy_headers=False)

@@ -364,6 +364,50 @@ function bindDashboard() {
   });
   bindHistory();
   bindTelegram();
+  bindRemoteAccess();
+}
+
+function bindRemoteAccess() {
+  const panel = document.querySelector("#remote-panel");
+  const list = document.querySelector("#remote-details");
+  const diagnostic = document.querySelector("#remote-diagnostic");
+  const refresh = document.querySelector("#remote-refresh");
+  async function load() {
+    refresh.disabled = true;
+    try {
+      const info = await api("remote-access");
+      const modes = {LOCAL: "محلی", SSH_ONLY: "تونل SSH", SECURE_REMOTE: "HTTPS از راه دور"};
+      const fields = [
+        ["حالت دسترسی", modes[info.mode]],
+        ["آدرس محلی", info.local_url],
+        ["سرویس پنل", info.worker_alive ? "فعال" : "نیاز به بررسی"],
+        ["آی‌پی عمومی", info.public_ip],
+        ["آدرس HTTPS پیکربندی‌شده", info.remote_url],
+        ["پراکسی HTTPS", info.proxy === "local_https_verified" ? "در آخرین بررسی محلی تأیید شد" : "خاموش"],
+        ["گواهی HTTPS", ({acme:"Let’s Encrypt", private_ca:"مرجع خصوصی", imported_public:"مرجع عمومی"})[info.certificate_mode]],
+        ["انقضای گواهی", info.certificate_expires ? date.format(new Date(info.certificate_expires)) : null]
+      ];
+      list.replaceChildren();
+      for (const [name, value] of fields) {
+        if (!value) continue;
+        const title = document.createElement("dt");
+        const item = document.createElement("dd");
+        title.textContent = name;
+        item.textContent = value;
+        item.dir = "auto";
+        list.append(title, item);
+      }
+      diagnostic.textContent = info.diagnostic || (info.remote_url
+        ? "برای بررسی دسترسی اینترنتی، آدرس HTTPS را با اینترنت موبایل امتحان کنید."
+        : "برای فعال‌کردن HTTPS یا دیدن مراحل تونل SSH، دستور sudo mobocloud remote را اجرا کنید.");
+    } catch (error) {
+      diagnostic.textContent = errorText(error.message);
+    } finally {
+      refresh.disabled = false;
+    }
+  }
+  panel.ontoggle = () => { if (panel.open && !refresh.disabled) load(); };
+  refresh.onclick = load;
 }
 
 function bindTelegram() {

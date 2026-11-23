@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 [ "${1:-}" = "--remove-unit" ] || { echo 'Pass --remove-unit to stop and uninstall the named service. Data and releases are preserved.'; exit 2; }
+for unit in mobocloud-remote.service mobocloud-remote-renew.timer; do
+    if [ -f "/etc/systemd/system/$unit" ]; then systemctl disable --now "$unit"; fi
+done
 systemctl disable --now mobohub-lab.service
-rm -f /etc/systemd/system/mobohub-lab.service
+rm -f /etc/systemd/system/mobohub-lab.service /etc/systemd/system/mobocloud-remote.service \
+      /etc/systemd/system/mobocloud-remote-renew.service /etc/systemd/system/mobocloud-remote-renew.timer
 systemctl daemon-reload

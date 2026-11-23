@@ -119,6 +119,10 @@ def edit_settings(path):
                 return False
             try:
                 validate({**current, **changed})
+                if "LAB_PORT" in changed and path == Path("/etc/mobohub-network-lab/settings"):
+                    from .remote_access import status
+                    if status().get("remote_url"):
+                        raise ValueError("Disable remote access before changing the backend port, then enable it with the new port.")
                 replace_text(path, render_settings(lines, indices, changed), expected=original)
             except ValueError as exc:
                 print(f"Settings were not saved. {exc}")
