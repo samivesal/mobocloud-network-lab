@@ -1,5 +1,7 @@
 # Operating the station
 
+For the independent HTTPS service, IP certificates, Huawei port forwarding and rollback, see the [remote-access guide](remote-access.md).
+
 ## Installation and release management
 
 Use a separately approved Linux host. The installer targets Debian 13 with systemd, python3-venv, curl 8.4+, openssl, useradd, runuser and a reachable Python package index. Supply a trusted Xray executable separately for real VPN testing. Verify its provenance and version under the service account. The application requires Linux /proc visibility of its own sockets and children. No route, resolver, modem or firewall configuration is needed.

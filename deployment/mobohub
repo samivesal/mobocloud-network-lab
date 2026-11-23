@@ -23,7 +23,9 @@ address() {
 }
 
 action() {
-    case "$1" in
+    operation=$1
+    shift
+    case "$operation" in
         status) systemctl --no-pager status "$service" ;;
         address) address ;;
         health)
@@ -54,18 +56,22 @@ action() {
                 LAB_DATA=/var/lib/mobohub-network-lab LAB_KEY_DIR=/etc/mobohub-network-lab/keys \
                 .venv/bin/python -m lab.telegram_agent)
             ;;
-        *) printf '%s\n' 'Usage: mobocloud [status|address|health|logs|restart|settings|reset-password|telegram]' >&2; return 2 ;;
+        remote)
+            if [ "$#" -eq 0 ]; then set -- menu; fi
+            manage -m lab.remote_access "$@"
+            ;;
+        *) printf '%s\n' 'Usage: mobocloud [status|address|health|logs|restart|settings|reset-password|telegram|remote]' >&2; return 2 ;;
     esac
 }
 
 if [ "$#" -gt 0 ]; then
-    action "$1"
+    action "$@"
     exit
 fi
 
 while :; do
     printf '\nMobocloud Network Lab · %s\n' "$(address)"
-    printf '%s\n' '1) Service status' '2) Service logs' '3) Restart service' '4) Settings' '5) Reset administrator password' '6) Telegram relay' '0) Exit'
+    printf '%s\n' '1) Service status' '2) Service logs' '3) Restart service' '4) Settings' '5) Reset administrator password' '6) Telegram relay' '7) Remote access' '0) Exit'
     printf '%s' 'Select: '
     IFS= read -r choice || break
     case "$choice" in
@@ -75,6 +81,7 @@ while :; do
         4) action settings || : ;;
         5) action reset-password || : ;;
         6) action telegram || : ;;
+        7) action remote || : ;;
         0) break ;;
         *) printf '%s\n' 'Enter a menu option.' ;;
     esac

@@ -57,6 +57,10 @@ main section + section { margin-top: 32px; }
 .relay-wide { grid-column: 1 / -1; overflow-wrap: anywhere; }
 .relay-key-option { align-self: start; box-shadow: none; }
 .relay-key-option label { padding: 0 16px 12px; }
+.remote-body { padding: 0 20px 20px; }
+.remote-body dl { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 6px 12px; }
+.remote-body dt { color: var(--muted); }
+.remote-body dd { margin: 0; overflow-wrap: anywhere; }
 label { display: grid; gap: 5px; font-size: .88rem; min-width: 0; }
 button, input, select { font: inherit; color: inherit; min-height: 44px; border: 1px solid var(--border); border-radius: 12px; background: var(--input); padding: 7px 12px; }
 input, select { width: 100%; min-width: 0; }

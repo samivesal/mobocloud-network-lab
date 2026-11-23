@@ -1,0 +1,17 @@
+[Unit]
+Description=Renew the dedicated Mobocloud IP certificate
+After=network-online.target mobohub-lab.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mobohub-lab/current/.venv/bin/python -m lab.remote_access renew
+WorkingDirectory=/opt/mobohub-lab/current
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/mobohub-network-lab /run/mobocloud-remote
+TimeoutStartSec=5min

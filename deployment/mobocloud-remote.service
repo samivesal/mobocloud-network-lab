@@ -1,0 +1,25 @@
+[Unit]
+Description=Mobocloud HTTPS gateway
+After=network-online.target mobohub-lab.service
+Wants=network-online.target mobohub-lab.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/mobohub-lab/current
+RuntimeDirectory=mobocloud-remote
+RuntimeDirectoryPreserve=yes
+ExecStartPre=/opt/mobohub-lab/current/.venv/bin/python -m lab.remote_access cert-guard
+ExecStartPre=/usr/sbin/nginx -t -q -p /run/mobocloud-remote/ -c /etc/mobohub-network-lab/remote/current/nginx.conf
+ExecStart=/usr/sbin/nginx -p /run/mobocloud-remote/ -c /etc/mobohub-network-lab/remote/current/nginx.conf -g "daemon off;"
+Restart=on-failure
+RestartSec=5
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_CHOWN CAP_FOWNER CAP_DAC_OVERRIDE CAP_KILL
+RestrictAddressFamilies=AF_INET AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

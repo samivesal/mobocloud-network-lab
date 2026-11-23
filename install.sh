@@ -15,7 +15,17 @@ fi
 
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-url=https://github.com/samivesal/mobocloud-network-lab/archive/refs/heads/main.tar.gz
+case "${1-}" in
+    "") url=https://github.com/samivesal/mobocloud-network-lab/archive/refs/heads/main.tar.gz ;;
+    --ref)
+        [ "$#" -eq 2 ] && printf '%s\n' "$2" | grep -Eq '^[a-f0-9]{40}$' || {
+            echo 'Use --ref with a full Git commit SHA.' >&2
+            exit 2
+        }
+        url=https://github.com/samivesal/mobocloud-network-lab/archive/$2.tar.gz
+        ;;
+    *) echo 'Usage: install.sh [--ref COMMIT_SHA]' >&2; exit 2 ;;
+esac
 if ! curl -q --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 15 --max-time 120 "$url" -o "$work/source.tgz"; then
     echo 'Could not download the public Mobocloud release from GitHub.' >&2

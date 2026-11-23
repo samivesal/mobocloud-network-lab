@@ -15,9 +15,9 @@ esac
 [ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] && [ "$(id -u)" = 0 ] || { echo 'Requires root on Debian 13'; exit 1; }
 if [ "$start" = 1 ]; then
     apt-get update
-    apt-get install -y ca-certificates curl openssh-client python3-venv
+    apt-get install -y ca-certificates curl iproute2 openssl openssh-client python3-venv
 fi
-for cmd in python3 curl systemctl runuser useradd; do
+for cmd in python3 curl flock systemctl runuser useradd; do
     if ! command -v "$cmd" >/dev/null; then
         printf 'Mobocloud installation stopped: required command not found: %s\n' "$cmd" >&2
         exit 1
@@ -34,6 +34,8 @@ if [ -e "$state/lab.sqlite" ] && [ ! -s "$conf/keys/identity.json" ]; then
 fi
 if ! id mobohub-lab >/dev/null 2>&1; then useradd --system --user-group --no-create-home --shell /usr/sbin/nologin mobohub-lab; fi
 install -d -m 0755 "$base" "$base/releases" "$base/bin"
+exec 9>"$base/install.lock"
+flock -n 9 || { echo 'Another Mobocloud installation is running.' >&2; exit 1; }
 engine_ready=1
 if [ "$start" = 1 ] && [ ! -x "$base/bin/xray" ] && \
     ! PATH=/usr/local/bin:/usr/bin:/bin command -v xray >/dev/null &&
@@ -46,8 +48,12 @@ fi
 dest=$(mktemp -d "$base/releases/$(date -u +%Y%m%dT%H%M%SZ).XXXXXX")
 release=${dest##*/}
 cp -r "$src/lab" "$src/frontend" "$src/requirements.txt" "$dest/"
-python3 -m venv "$dest/.venv"
-"$dest/.venv/bin/pip" install -r "$dest/requirements.txt"
+if [ -x "$base/current/.venv/bin/python" ] && cmp -s "$base/current/requirements.txt" "$dest/requirements.txt"; then
+    ln -s "$(readlink -f "$base/current/.venv")" "$dest/.venv"
+else
+    python3 -m venv "$dest/.venv"
+    "$dest/.venv/bin/pip" install -r "$dest/requirements.txt"
+fi
 chmod -R a+rX "$dest"
 install -d -m 0750 -g mobohub-lab "$conf" "$conf/keys"
 if [ ! -f "$conf/settings" ]; then
@@ -71,7 +77,48 @@ if [ ! -f "$conf/keys/identity.json" ]; then
  chmod 0640 "$conf/keys/identity.json"
 fi
 (cd "$dest" && runuser -u mobohub-lab -- .venv/bin/python -B -c 'import lab.main, lab.runner')
-install -m 0644 "$src/deployment/mobohub-lab.service" /etc/systemd/system/mobohub-lab.service
+install -d -m 0700 "$dest/installer-backup"
+backup=$dest/installer-backup
+units='mobohub-lab.service mobocloud-remote.service mobocloud-remote-renew.service mobocloud-remote-renew.timer'
+previous=$(readlink "$base/current" || true)
+for unit in $units; do
+    if [ -f "/etc/systemd/system/$unit" ]; then cp -p "/etc/systemd/system/$unit" "$backup/$unit"; fi
+done
+if [ -f /usr/local/bin/mobocloud ]; then cp -p /usr/local/bin/mobocloud "$backup/mobocloud"; fi
+previous_enabled=0
+if systemctl is-enabled --quiet mobohub-lab.service; then previous_enabled=1; fi
+restore_installation() {
+    result=$?
+    if [ "$result" -eq 0 ]; then return; fi
+    set +e
+    printf '%s\n' 'Restoring the previous Mobocloud installation.' >&2
+    if [ "$previous_enabled" -eq 0 ]; then systemctl disable mobohub-lab.service; fi
+    if [ -n "$previous" ]; then
+        ln -sfn "$previous" "$base/.rollback-$release"
+        mv -Tf "$base/.rollback-$release" "$base/current"
+    else
+        systemctl stop mobohub-lab.service
+        rm -f "$base/current"
+    fi
+    for unit in $units; do
+        if [ -f "$backup/$unit" ]; then
+            cp -p "$backup/$unit" "/etc/systemd/system/$unit"
+        else
+            rm -f "/etc/systemd/system/$unit"
+        fi
+    done
+    if [ -f "$backup/mobocloud" ]; then
+        cp -p "$backup/mobocloud" /usr/local/bin/mobocloud
+    else
+        rm -f /usr/local/bin/mobocloud
+    fi
+    systemctl daemon-reload
+    if [ -n "$previous" ] && [ "$start" -eq 1 ]; then systemctl restart mobohub-lab.service; fi
+}
+trap restore_installation EXIT
+for unit in $units; do
+    install -m 0644 "$src/deployment/$unit" "/etc/systemd/system/$unit"
+done
 install -m 0755 "$src/deployment/mobohub" /usr/local/bin/mobocloud
 ln -sfnT mobocloud /usr/local/bin/mobohub
 ln -s "$dest" "$base/.current-$release"
@@ -81,6 +128,7 @@ if [ "$start" = 1 ]; then
     systemctl restart mobohub-lab.service
     for retry in 1 2 3 4 5 6 7 8 9 10; do
         if systemctl is-active --quiet mobohub-lab.service && /usr/local/bin/mobocloud health 2>/dev/null; then
+            systemctl enable mobohub-lab.service
             printf 'Web panel: %s\nTerminal menu: sudo mobocloud\n' "$(/usr/local/bin/mobocloud address)"
             exit 0
         fi
